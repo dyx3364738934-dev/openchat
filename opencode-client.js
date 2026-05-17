@@ -134,7 +134,29 @@ export async function resetSession(userId) {
   sessions.delete(userId);
 }
 
-export async function sendToAgent(userId, text, opts = {}) {
+/**
+ * 构建 parts 数组（文字 + 媒体）
+ * @param {string} text - 文字内容
+ * @param {Array<{type: string, mime?: string, filename?: string, url?: string}>} mediaParts - 媒体文件 parts
+ * @returns {Array} parts 数组
+ */
+function buildParts(text, mediaParts) {
+  const parts = [];
+  if (text) {
+    parts.push({ type: "text", text });
+  }
+  for (const mp of mediaParts) {
+    parts.push({
+      type: "file",
+      mime: mp.mime || "image/jpeg",
+      ...(mp.filename ? { filename: mp.filename } : {}),
+      url: mp.url,
+    });
+  }
+  return parts;
+}
+
+export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
   const base = await baseUrl();
   const h = headers();
   const sid = await getOrCreateSession(userId);
@@ -159,7 +181,8 @@ export async function sendToAgent(userId, text, opts = {}) {
   }
 
   const esid = encodeURIComponent(sid);
-  logger.info("opencode", "send", { userId, sid, textLen: text.length });
+  const parts = buildParts(text, mediaParts);
+  logger.info("opencode", "send", { userId, sid, textLen: text.length, mediaCount: mediaParts.length });
 
   const ctrl = new AbortController();
   const tm = setTimeout(() => ctrl.abort(), 300_000);
@@ -167,26 +190,30 @@ export async function sendToAgent(userId, text, opts = {}) {
   try {
     const res = await fetch(base + "/session/" + esid + "/message", {
       method: "POST", headers: h,
-      body: JSON.stringify({ parts: [{ type: "text", text }] }),
+      body: JSON.stringify({ parts }),
       signal: ctrl.signal,
     });
     clearTimeout(tm);
 
     if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
       if (res.status === 404) {
         sessions.delete(userId);
         const newSid = await getOrCreateSession(userId);
         const r2 = await fetch(base + "/session/" + encodeURIComponent(newSid) + "/message", {
           method: "POST", headers: h,
-          body: JSON.stringify({ parts: [{ type: "text", text }] }),
+          body: JSON.stringify({ parts }),
           signal: AbortSignal.timeout(300_000),
         });
-        if (!r2.ok) throw new Error("retry HTTP " + r2.status);
+        if (!r2.ok) {
+          const retryBody = await r2.text().catch(() => "");
+          throw new Error(`retry HTTP ${r2.status}: ${retryBody.slice(0, 300)}`);
+        }
         const r2j = await r2.json();
         const t2 = (r2j.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
         return { text: t2, parts: r2j.parts || [], info: r2j.info || null };
       }
-      throw new Error("HTTP " + res.status);
+      throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
     }
 
     const result = await res.json();

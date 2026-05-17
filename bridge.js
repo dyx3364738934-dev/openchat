@@ -43,6 +43,7 @@ import {
   resetSession,
 } from "./opencode-client.js";
 import { StreamingMarkdownFilter } from "./markdown-filter.js";
+import { extractImageFromItems } from "./cdn.js";
 import {
   restoreContextTokens,
   setContextToken,
@@ -61,6 +62,7 @@ const RETRY_DELAY_MS = 2000;
 const SESSION_EXPIRED_ERRCODE = -14;
 const SESSION_PAUSE_MS = 60 * 60 * 1000; // 1 小时
 const WECHAT_TEXT_LIMIT = 4000; // 微信单条消息文字上限
+const PENDING_MEDIA_TIMEOUT_MS = 60_000; // 60 秒等待文字描述
 
 // ======== CLI Args ========
 
@@ -318,6 +320,14 @@ async function detectPortForModels() {
   return null;
 }
 
+// ======== 待发送媒体暂存 ========
+
+/**
+ * pendingMedia: userId → { parts, contextToken, timer }
+ * 图片到达后暂存 60 秒，等文字拼合；超时则单独发送
+ */
+const pendingMedia = new Map();
+
 // ======== 处理单条消息 ========
 
 async function processOneMessage(msg, { token, baseUrl }) {
@@ -358,19 +368,83 @@ async function processOneMessage(msg, { token, baseUrl }) {
     itemTypes: msg.item_list?.map((i) => i.type).join(",") ?? "none",
   });
 
-  // 空消息或纯媒体消息：回复提示而非静默丢弃
-  if (!textBody.trim()) {
-    // 检查是否有媒体类型内容（图片、文件、视频、语音非文字部分）
-    const hasMedia = msg.item_list?.some(i =>
-      i.type === MessageItemType.IMAGE ||
-      i.type === MessageItemType.FILE ||
-      i.type === MessageItemType.VIDEO
-    ) ?? false;
-    if (hasMedia) {
-      logger.info("bridge", "收到媒体消息，回复提示", { from: fromUserId });
-      await sendMessage({ baseUrl, token, toUserId: fromUserId, text: "暂不支持图片/文件/视频消息，请发送文字 😊", contextToken });
+  // ======== 媒体处理 ========
+
+  const hasImage = msg.item_list?.some(i => i.type === MessageItemType.IMAGE) ?? false;
+  const hasFile = msg.item_list?.some(i => i.type === MessageItemType.FILE) ?? false;
+  const hasVideo = msg.item_list?.some(i => i.type === MessageItemType.VIDEO) ?? false;
+
+  // 文件/视频暂不支持
+  if (hasFile || hasVideo) {
+    logger.info("bridge", "收到文件/视频消息，暂不支持", { from: fromUserId });
+    await sendMessage({ baseUrl, token, toUserId: fromUserId, text: "暂不支持文件/视频消息，请发送文字或图片 😊", contextToken });
+    return;
+  }
+
+  // 图片处理：下载 → 暂存 → 等文字 / 超时单独发送
+  if (hasImage) {
+    try {
+      const imageData = await extractImageFromItems(msg.item_list);
+      if (!imageData) {
+        await sendMessage({ baseUrl, token, toUserId: fromUserId, text: "图片下载失败，请重试 😔", contextToken });
+        return;
+      }
+
+      const mediaParts = [{ type: "file", mime: imageData.mime, url: imageData.dataUrl }];
+      logger.info("bridge", "📷 图片已暂存", { from: fromUserId, sizeKB: Math.round(imageData.buffer.length / 1024), mime: imageData.mime });
+
+      // 保存 context_token
+      if (contextToken) {
+        setContextToken(ACCOUNT_ID, fromUserId, contextToken);
+      }
+
+      // 如果同一条消息里有文字，立即合并发送
+      if (textBody.trim()) {
+        await sendToAgentWithReply(fromUserId, textBody, mediaParts, { token, baseUrl, contextToken });
+        return;
+      }
+
+      // 只有图片，暂存等待文字
+      if (pendingMedia.has(fromUserId)) {
+        clearTimeout(pendingMedia.get(fromUserId).timer);
+      }
+
+      const timer = setTimeout(() => {
+        const media = pendingMedia.get(fromUserId);
+        if (!media) return;
+        pendingMedia.delete(fromUserId);
+        logger.info("bridge", "图片超时，单独发送给 AI", { from: fromUserId });
+        sendToAgentWithReply(fromUserId, "用户发送了一张图片", media.parts, { token, baseUrl, contextToken: media.contextToken })
+          .catch(err => logger.error("bridge", "图片超时发送失败", err));
+      }, PENDING_MEDIA_TIMEOUT_MS);
+
+      pendingMedia.set(fromUserId, { parts: mediaParts, contextToken, timer });
+      return;
+
+    } catch (err) {
+      logger.error("bridge", "图片处理失败", err);
+      await sendMessage({ baseUrl, token, toUserId: fromUserId, text: `图片处理失败：${err.message.slice(0, 80)}`, contextToken });
       return;
     }
+  }
+
+  // ======== 纯文字消息 ========
+
+  // 检查是否有暂存的图片等待合并
+  if (textBody.trim() && pendingMedia.has(fromUserId)) {
+    const media = pendingMedia.get(fromUserId);
+    clearTimeout(media.timer);
+    pendingMedia.delete(fromUserId);
+    if (contextToken) {
+      setContextToken(ACCOUNT_ID, fromUserId, contextToken);
+    }
+    logger.info("bridge", "🖼️📝 文字+图片合并发送", { from: fromUserId });
+    await sendToAgentWithReply(fromUserId, textBody, media.parts, { token, baseUrl, contextToken });
+    return;
+  }
+
+  // 空文字且无媒体 → 跳过
+  if (!textBody.trim()) {
     logger.debug("bridge", "空消息，跳过");
     return;
   }
@@ -380,13 +454,24 @@ async function processOneMessage(msg, { token, baseUrl }) {
     setContextToken(ACCOUNT_ID, fromUserId, contextToken);
   }
 
+  // 调用 agent 并回复（纯文字消息走这里）
+  await sendToAgentWithReply(fromUserId, textBody, [], { token, baseUrl, contextToken });
+}
+
+// ======== 调用 Agent 并回复 ========
+
+/**
+ * 统一的发消息 → 收回复 → 过滤 → 发送流程
+ * 支持图片回退：如果模型返回 400 等错误（不支持图片），自动用文字描述重试
+ */
+async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, contextToken }) {
   // 尝试获取 typing_ticket 并发送"正在输入…"
   let typingTicket = null;
   try {
     const config = await getWechatConfig({
       baseUrl,
       token,
-      ilinkUserId: fromUserId,
+      ilinkUserId: userId,
       contextToken,
     });
     typingTicket = config.typing_ticket;
@@ -394,10 +479,10 @@ async function processOneMessage(msg, { token, baseUrl }) {
       await sendTyping({
         baseUrl,
         token,
-        ilinkUserId: fromUserId,
+        ilinkUserId: userId,
         typingTicket,
         status: TypingStatus.TYPING,
-      }).catch(() => {}); // 忽略 typing 错误
+      }).catch(() => {});
     }
   } catch (err) {
     logger.debug("bridge", "获取 typing_ticket 失败（非关键）", err);
@@ -406,10 +491,10 @@ async function processOneMessage(msg, { token, baseUrl }) {
   const startTime = Date.now();
 
   try {
-    // 调用 OpenCode agent（session 自动创建，model/agent 由 opencode-client 管理）
-    logger.info("bridge", `🤖 调用 agent`, { from: fromUserId });
-    const prefs = userPrefs.get(fromUserId) || {};
-    const result = await sendToAgent(fromUserId, textBody, prefs);
+    // 调用 OpenCode agent（支持文字 + 媒体）
+    logger.info("bridge", `🤖 调用 agent`, { from: userId, hasMedia: mediaParts.length > 0 });
+    const prefs = userPrefs.get(userId) || {};
+    const result = await sendToAgent(userId, text, prefs, mediaParts);
     const aiMs = Date.now() - startTime;
 
     // Markdown 过滤
@@ -425,27 +510,54 @@ async function processOneMessage(msg, { token, baseUrl }) {
       await sendMessage({
         baseUrl,
         token,
-        toUserId: fromUserId,
+        toUserId: userId,
         text: chunks[i],
         contextToken,
       });
-      // 段间稍作延迟，避免微信限流
       if (i < chunks.length - 1) {
         await sleep(500);
       }
     }
 
-    console.log(`✅ 回复已发送 → ${fromUserId} (${aiMs}ms, ${chunks.length}段)`);
+    console.log(`✅ 回复已发送 → ${userId} (${aiMs}ms, ${chunks.length}段${mediaParts.length ? ", 📷" : ""})`);
   } catch (err) {
     logger.error("bridge", "处理消息失败", err);
-    console.error(`❌ 回复失败 → ${fromUserId}: ${err.message}`);
 
-    // 发送错误提示给用户
+    // 如果带图片发送失败，尝试用文字描述回退重试
+    const isMediaError = mediaParts.length > 0 && (
+      /image|file|part|multimodal|vision|unsupported/i.test(err.message) ||
+      /400|422/i.test(err.message)
+    );
+
+    if (isMediaError) {
+      logger.info("bridge", "模型不支持图片，回退为文字描述", { from: userId });
+      const fallbackText = text.trim()
+        ? `[用户发送了一张图片]\n${text}`
+        : "[用户发送了一张图片，但当前模型不支持识别图片]";
+      try {
+        const prefs = userPrefs.get(userId) || {};
+        const retryResult = await sendToAgent(userId, fallbackText, prefs);
+        const filter = new StreamingMarkdownFilter();
+        const filtered = filter.feed(retryResult.text) + filter.flush();
+        const chunks = splitLongText(filtered);
+        for (let i = 0; i < chunks.length; i++) {
+          await sendMessage({ baseUrl, token, toUserId: userId, text: chunks[i], contextToken });
+          if (i < chunks.length - 1) await sleep(500);
+        }
+        console.log(`✅ 回复已发送（图片回退） → ${userId}`);
+        return;
+      } catch (retryErr) {
+        logger.error("bridge", "图片回退重试也失败", retryErr);
+      }
+    }
+
+    console.error(`❌ 回复失败 → ${userId}: ${err.message}`);
+
     try {
       await sendMessage({
         baseUrl,
         token,
-        toUserId: fromUserId,
+        toUserId: userId,
         text: `⚠️ 抱歉，处理您的消息时出错了：${err.message.slice(0, 100)}`,
         contextToken,
       });
@@ -453,12 +565,11 @@ async function processOneMessage(msg, { token, baseUrl }) {
       // 连错误提示都发不出去就算了
     }
   } finally {
-    // 取消"正在输入…"
     if (typingTicket) {
       await sendTyping({
         baseUrl,
         token,
-        ilinkUserId: fromUserId,
+        ilinkUserId: userId,
         typingTicket,
         status: TypingStatus.CANCEL,
       }).catch(() => {});

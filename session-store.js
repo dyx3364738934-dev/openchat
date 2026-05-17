@@ -9,6 +9,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { promises as fsp } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { getConfig } from "./config.js";
 
@@ -26,22 +27,24 @@ function resolveContextTokenPath(accountId) {
   return resolve(stateDir, `${accountId}.context-tokens.json`);
 }
 
-/** 持久化某个 account 的所有 context token 到磁盘 */
+/** 持久化某个 account 的所有 context token（异步写入，不阻塞事件循环） */
+let _persistTimers = {};
 function persistContextTokens(accountId) {
-  const prefix = `${accountId}:`;
-  const tokens = {};
-  for (const [k, v] of contextTokenStore) {
-    if (k.startsWith(prefix)) {
-      tokens[k.slice(prefix.length)] = v;
+  // 防抖：500ms 内合并多次写入
+  if (_persistTimers[accountId]) clearTimeout(_persistTimers[accountId]);
+  _persistTimers[accountId] = setTimeout(() => {
+    const prefix = `${accountId}:`;
+    const tokens = {};
+    for (const [k, v] of contextTokenStore) {
+      if (k.startsWith(prefix)) {
+        tokens[k.slice(prefix.length)] = v;
+      }
     }
-  }
-  const filePath = resolveContextTokenPath(accountId);
-  try {
-    mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, JSON.stringify(tokens, null, 0), "utf-8");
-  } catch (err) {
-    console.error(`persistContextTokens: 写入失败 ${filePath}: ${err.message}`);
-  }
+    const filePath = resolveContextTokenPath(accountId);
+    fsp.mkdir(dirname(filePath), { recursive: true }).then(() =>
+      fsp.writeFile(filePath, JSON.stringify(tokens, null, 0), "utf-8")
+    ).catch(err => console.error(`persistContextTokens: 写入失败 ${filePath}: ${err.message}`));
+  }, 500);
 }
 
 /** 从磁盘恢复 context token 到内存 */
@@ -83,15 +86,13 @@ function resolveSyncBufPath(accountId) {
   return resolve(stateDir, `${accountId}.sync.json`);
 }
 
-/** 保存 get_updates_buf */
+/** 保存 get_updates_buf（异步写入） */
 export function saveGetUpdatesBuf(accountId, buf) {
   const filePath = resolveSyncBufPath(accountId);
-  try {
-    mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, JSON.stringify({ buf, savedAt: new Date().toISOString() }), "utf-8");
-  } catch (err) {
-    console.error(`saveGetUpdatesBuf: 写入失败 ${filePath}: ${err.message}`);
-  }
+  const data = JSON.stringify({ buf, savedAt: new Date().toISOString() });
+  fsp.mkdir(dirname(filePath), { recursive: true }).then(() =>
+    fsp.writeFile(filePath, data, "utf-8")
+  ).catch(err => console.error(`saveGetUpdatesBuf: 写入失败 ${filePath}: ${err.message}`));
 }
 
 /** 读取 get_updates_buf */

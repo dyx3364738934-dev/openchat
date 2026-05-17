@@ -72,7 +72,7 @@ export class StreamingMarkdownFilter {
     // EOF 时，闭合未完成的内联格式
     if (eof && this.inl) {
       const markers = {
-        image: "![", bold3: "***", italic: "*", ubold3: "___", uitalic: "_"
+        image: "![", bold3: "***", italic: "*", ubold3: "___", uitalic: "_", del: "~~"
       };
       out += (markers[this.inl.type] ?? "") + this.inl.acc;
       this.inl = null;
@@ -147,12 +147,12 @@ export class StreamingMarkdownFilter {
     // 引用 >  → 去掉标记符
     if (b[0] === ">") { this.sol = false; return ""; }
 
-    // H5/H6 标题 ##### → 去掉标记符，保留文字
+    // H1-H6 标题 ### → 去掉标记符，保留文字
     if (b[0] === "#") {
       let n = 0;
       while (n < b.length && b[n] === "#") n++;
       if (n === b.length && !eof) return "";
-      if (n >= 5 && n <= 6 && n < b.length && b[n] === " ") {
+      if (n >= 1 && n <= 6 && n < b.length && b[n] === " ") {
         this.buf = b.slice(n + 1);
         this.sol = false;
         return "";
@@ -218,8 +218,17 @@ export class StreamingMarkdownFilter {
         return out;
       }
 
-      // 删除线 ~~ → 去掉符号
-      if (c === "~") { i++; continue; }
+      // 删除线 ~~ → 去掉符号，保留内容
+      if (c === "~") {
+        if (i + 1 < this.buf.length && this.buf[i + 1] === "~") {
+          out += this.buf.slice(0, i);
+          this.buf = this.buf.slice(i + 2);
+          this.inl = { type: "del", acc: "" };
+          return out;
+        }
+        i++;
+        continue;
+      }
 
       // *** ___ → 粗体+斜体
       if (c === "*") {
@@ -357,6 +366,16 @@ export class StreamingMarkdownFilter {
           this.buf = this.inl.acc.slice(cp + 1);
           this.inl = null;
           return ""; // 整段删除
+        }
+        return "";
+      }
+      case "del": {
+        const idx = this.inl.acc.indexOf("~~");
+        if (idx !== -1) {
+          const content = this.inl.acc.slice(0, idx);
+          this.buf = this.inl.acc.slice(idx + 2);
+          this.inl = null;
+          return content; // 去掉 ~~ 标记，保留内容
         }
         return "";
       }

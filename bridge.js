@@ -15,17 +15,13 @@
  *   node bridge.js --login-only   Login only, skip main loop
  *   node bridge.js --no-log-window Skip separate log window
  *
- * Env vars (override config.json):
+* Env vars (override config.json):
  *   WECHAT_TOKEN             WeChat bot token
- *   OP
-
-NCODE_AGENT            Agent type (default: build)
- *   OP
-
-NCODE_MODEL            Model (default: deepseek-v4-pro)
+ *   OPENCODE_AGENT           Agent type (default: build)
+ *   OPENCODE_MODEL           Model (default: deepseek-v4-pro)
  */
 
-import { getConfig, saveToken } from "./config.js";
+import { getConfig, saveToken, OC_PREFIX } from "./config.js";
 import { logger } from "./logger.js";
 import { wechatQrLogin } from "./wechat-auth.js";
 import {
@@ -36,6 +32,7 @@ import {
   notifyStart,
   notifyStop,
   extractTextFromItemList,
+  MessageItemType,
   TypingStatus,
 } from "./wechat-api.js";
 import {
@@ -125,7 +122,7 @@ async function ensureLogin(args) {
 
 /**
  * 将长文本按微信消息限制分割
- * 尽量在换行处分割，避免截断代码块
+ * 尽量在换行处分割，避免截断代码块（保持 ``` 配对）
  */
 function splitLongText(text, limit = WECHAT_TEXT_LIMIT) {
   if (text.length <= limit) return [text];
@@ -140,6 +137,20 @@ function splitLongText(text, limit = WECHAT_TEXT_LIMIT) {
     const nlIndex = remaining.lastIndexOf("\n", limit);
     if (nlIndex > searchStart) {
       splitAt = nlIndex + 1;
+    }
+
+    // 检查分割点前后是否在代码块内（未闭合的 ```）
+    const beforeSplit = remaining.slice(0, splitAt);
+    const fenceCount = (beforeSplit.match(/```/g) || []).length;
+    // 奇数个 ``` 表示代码块未闭合，需要扩展到下一个闭合点
+    if (fenceCount % 2 !== 0) {
+      const closeIndex = remaining.indexOf("```", splitAt);
+      if (closeIndex !== -1) {
+        // 包含闭合 ``` 所在行的结尾
+        const afterClose = remaining.indexOf("\n", closeIndex);
+        splitAt = (afterClose !== -1 ? afterClose + 1 : closeIndex + 3);
+      }
+      // 找不到闭合点 → 不分割，看最终剩余是否超限（只能硬切）
     }
 
     chunks.push(remaining.slice(0, splitAt));
@@ -157,6 +168,9 @@ const userPrefs = new Map(); // userId → { model?, agent? }
 /** 命令上下文（交互式命令用） */
 const cmdContext = new Map(); // userId → { cmd, data }
 
+/** 有效 / 命令列表（不含交互子命令） */
+const VALID_COMMANDS = new Set(["reset", "status", "model", "agent", "help"]);
+
 async function handleSlashCommand(raw, userId, { token, baseUrl, contextToken }) {
   const parts = raw.slice(1).split(/\s+/);
   const cmd = parts[0].toLowerCase();
@@ -165,26 +179,33 @@ async function handleSlashCommand(raw, userId, { token, baseUrl, contextToken })
   // 如果用户在交互模式中
   const ctx = cmdContext.get(userId);
   if (ctx && ctx.cmd === "model") {
-    // /model 2  → 解析为选择序号 2
-    const choice = (cmd === "model" && args[0]) ? args[0] : cmd;
-    if (!isNaN(choice)) {
-      const idx = parseInt(choice) - 1;
-      if (idx >= 0 && idx < ctx.data.length) {
-        const chosen = ctx.data[idx];
-        userPrefs.set(userId, { ...userPrefs.get(userId), model: chosen.id });
-        cmdContext.delete(userId);
-        return `模型已切换为 ${chosen.id}\n(${chosen.name || chosen.id})`;
-      }
-      return `序号超出范围 (1-${ctx.data.length})，请重新输入`;
-    }
-    // 非数字 → 名称匹配
-    const match = ctx.data.find(m => m.id === choice || m.name === choice || m.id.endsWith("/" + choice));
-    if (match) {
-      userPrefs.set(userId, { ...userPrefs.get(userId), model: match.id });
+    // 如果输入的是其他有效 / 命令（如 /help /reset），先退出交互模式再执行
+    if (cmd !== "model" && VALID_COMMANDS.has(cmd)) {
       cmdContext.delete(userId);
-      return `模型已切换为 ${match.id}`;
+      // 继续往下执行该命令
+    } else {
+      // /model 2  → 解析为选择序号 2
+      const choice = (cmd === "model" && args[0]) ? args[0] : cmd;
+      // 严格数字判断：排除空字符串和纯空格
+      if (choice !== "" && !isNaN(Number(choice))) {
+        const idx = parseInt(choice) - 1;
+        if (idx >= 0 && idx < ctx.data.length) {
+          const chosen = ctx.data[idx];
+          userPrefs.set(userId, { ...userPrefs.get(userId), model: chosen.id });
+          cmdContext.delete(userId);
+          return `模型已切换为 ${chosen.id}\n(${chosen.name || chosen.id})`;
+        }
+        return `序号超出范围 (1-${ctx.data.length})，请重新输入`;
+      }
+      // 非数字 → 名称匹配
+      const match = ctx.data.find(m => m.id === choice || m.name === choice || m.id.endsWith("/" + choice));
+      if (match) {
+        userPrefs.set(userId, { ...userPrefs.get(userId), model: match.id });
+        cmdContext.delete(userId);
+        return `模型已切换为 ${match.id}`;
+      }
+      return `未找到 "${choice}"，请重试 (/model 重新列表，或输入其他命令如 /help)`;
     }
-    return `未找到 "${choice}"，请重试 (/model 重新列表)`;
   }
 
   // 清除之前的交互上下文
@@ -246,7 +267,7 @@ async function fetchAvailableModels() {
 
   // 1) 从当前可用的 session 列表中提取模型
   try {
-    const auth = "Basic " + Buffer.from("opencode:" + (process.env["OP"+"ENCODE_SERVER_PASSWORD"] || "")).toString("base64");
+    const auth = "Basic " + Buffer.from("opencode:" + (process.env[OC_PREFIX + "SERVER_PASSWORD"] || "")).toString("base64");
     const port = await detectPortForModels();
     if (port) {
       const r = await fetch("http://127.0.0.1:" + port + "/session", {
@@ -264,7 +285,9 @@ async function fetchAvailableModels() {
         }
       }
     }
-  } catch {}
+  } catch (err) {
+    logger.debug("bridge", "获取 session 列表中的模型失败", err.message);
+  }
 
   // 2) 当前默认模型
   const cfg = getConfig();
@@ -323,6 +346,11 @@ async function processOneMessage(msg, { token, baseUrl }) {
     return;
   }
 
+  // 非 / 命令的普通消息：清除残留的交互上下文（如 /model 列表选择状态）
+  if (cmdContext.has(fromUserId)) {
+    cmdContext.delete(fromUserId);
+  }
+
   logger.info("bridge", `📩 收到消息`, {
     from: fromUserId,
     textLen: textBody.length,
@@ -330,8 +358,19 @@ async function processOneMessage(msg, { token, baseUrl }) {
     itemTypes: msg.item_list?.map((i) => i.type).join(",") ?? "none",
   });
 
-  // 空消息跳过
+  // 空消息或纯媒体消息：回复提示而非静默丢弃
   if (!textBody.trim()) {
+    // 检查是否有媒体类型内容（图片、文件、视频、语音非文字部分）
+    const hasMedia = msg.item_list?.some(i =>
+      i.type === MessageItemType.IMAGE ||
+      i.type === MessageItemType.FILE ||
+      i.type === MessageItemType.VIDEO
+    ) ?? false;
+    if (hasMedia) {
+      logger.info("bridge", "收到媒体消息，回复提示", { from: fromUserId });
+      await sendMessage({ baseUrl, token, toUserId: fromUserId, text: "暂不支持图片/文件/视频消息，请发送文字 😊", contextToken });
+      return;
+    }
     logger.debug("bridge", "空消息，跳过");
     return;
   }
@@ -454,12 +493,24 @@ async function mainLoop({ token, baseUrl }) {
   });
 
   const abortController = new AbortController();
+  let activeMessages = 0; // 正在处理的消息数
+  let shuttingDown = false;
 
-  // 优雅退出
+  // 优雅退出：等待正在处理的消息完成
   const shutdown = async (signal) => {
     console.log(`\n🛑 收到 ${signal}，正在关闭...`);
     logger.info("bridge", `收到 ${signal}，开始关闭`);
+    shuttingDown = true;
     abortController.abort();
+
+    // 等待正在处理的消息完成（最多 10 秒）
+    if (activeMessages > 0) {
+      console.log(`⏳ 等待 ${activeMessages} 条消息处理完成...`);
+      const deadline = Date.now() + 10000;
+      while (activeMessages > 0 && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
 
     try {
       await notifyStop({ baseUrl, token });
@@ -495,9 +546,10 @@ async function mainLoop({ token, baseUrl }) {
         timeoutMs: longPollTimeoutMs,
       });
 
-      // 服务端建议的超时时间
-      if (resp.longpolling_timeout_ms > 0) {
-        longPollTimeoutMs = resp.longpolling_timeout_ms;
+      // 服务端建议的超时时间（含边界校验）
+      const suggested = resp.longpolling_timeout_ms;
+      if (suggested > 0) {
+        longPollTimeoutMs = Math.max(10000, Math.min(120000, suggested));
       }
 
       // 检查错误
@@ -551,7 +603,13 @@ async function mainLoop({ token, baseUrl }) {
       }
 
       for (const msg of msgs) {
-        await processOneMessage(msg, { token, baseUrl });
+        if (shuttingDown) break;
+        activeMessages++;
+        try {
+          await processOneMessage(msg, { token, baseUrl });
+        } finally {
+          activeMessages--;
+        }
       }
     } catch (err) {
       if (abortController.signal.aborted) break;

@@ -15,6 +15,7 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { promises as fsp } from "node:fs";
 import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { getConfig } from "./config.js";
@@ -24,6 +25,8 @@ const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 let _logPath = null;
 let _logLevel = LOG_LEVELS.INFO;
 let _windowOpened = false;
+let _writeQueue = [];
+let _writing = false;
 
 function getLogPath() {
   if (_logPath) return _logPath;
@@ -31,6 +34,22 @@ function getLogPath() {
   mkdirSync(logDir, { recursive: true });
   _logPath = resolve(logDir, "bridge.log");
   return _logPath;
+}
+
+/** 异步批量写入日志（防抖 50ms） */
+function flushLogQueue() {
+  if (_writing || _writeQueue.length === 0) return;
+  _writing = true;
+  const logs = _writeQueue.join("\n") + "\n";
+  _writeQueue = [];
+  const logPath = getLogPath();
+  fsp.appendFile(logPath, logs, "utf-8").catch(err => {
+    console.error(`logger: 异步写入日志文件失败 ${err.message}`);
+  }).finally(() => { _writing = false; });
+  // 如果队列中又积累了日志，安排下次写入
+  if (_writeQueue.length > 0) {
+    setTimeout(flushLogQueue, 50);
+  }
 }
 
 function timestamp() {
@@ -64,16 +83,18 @@ function writeLog(level, module, message, extra) {
   const line = formatMessage(level, module, message, extra);
   const logPath = getLogPath();
 
-  // 同时输出到控制台（主进程能看到）
+  // 同时输出到控制台（携带时间戳和等级，与文件格式一致）
   const consoleMethod = level === "ERROR" ? console.error :
     level === "WARN" ? console.warn : console.log;
-  consoleMethod(`[${module}] ${message}`);
+  consoleMethod(`[${new Date().toISOString()}] [${level}] [${module}] ${message}${extra !== undefined ? (typeof extra === "string" ? ` | ${extra}` : extra instanceof Error ? ` | ${extra.message}` : ` | ${JSON.stringify(extra)}`) : ""}`);
 
-  // 写入日志文件
-  try {
-    appendFileSync(logPath, line + "\n", "utf-8");
-  } catch (err) {
-    console.error(`logger: 写入日志文件失败 ${err.message}`);
+  // 写入缓冲队列，异步 flush
+  _writeQueue.push(line);
+  // ERROR 级别立即 flush，其他级别延迟
+  if (level === "ERROR" || _writeQueue.length >= 10) {
+    flushLogQueue();
+  } else {
+    setTimeout(flushLogQueue, 50);
   }
 }
 

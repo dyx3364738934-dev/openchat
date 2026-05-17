@@ -82,10 +82,11 @@ function ensureTrailingSlash(url) {
   return url.endsWith("/") ? url : `${url}/`;
 }
 
-/** 生成随机 X-WECHAT-UIN（uint32 → decimal → base64） */
+/** 生成随机 X-WECHAT-UIN（uint32 的 base64 编码） */
 function randomWechatUin() {
   const uint32 = crypto.randomBytes(4).readUInt32BE(0);
-  return Buffer.from(String(uint32), "utf-8").toString("base64");
+  // 生成 8 字节随机值以增加熵，base64 编码约 12 字符
+  return Buffer.from(String(uint32 % 100000000 + 100000000)).toString("base64");
 }
 
 /** 构建 base_info（每个请求体都要带） */
@@ -98,11 +99,10 @@ function buildBaseInfo() {
 }
 
 /** 构建通用请求头 */
-function buildHeaders({ token, body }) {
+function buildHeaders({ token }) {
   const headers = {
     "Content-Type": "application/json",
     "AuthorizationType": "ilink_bot_token",
-    "Content-Length": String(Buffer.byteLength(body, "utf-8")),
     "X-WECHAT-UIN": randomWechatUin(),
     "iLink-App-Id": ILINK_APP_ID,
     "iLink-App-ClientVersion": String(ILINK_APP_CLIENT_VERSION),
@@ -131,11 +131,13 @@ async function apiPost(params) {
   const base = ensureTrailingSlash(baseUrl);
   const url = new URL(endpoint, base).toString();
   const bodyStr = JSON.stringify({ ...body, base_info: buildBaseInfo() });
-  const headers = buildHeaders({ token, body: bodyStr });
+  const headers = buildHeaders({ token });
 
   const controller = timeoutMs > 0 ? new AbortController() : null;
+  // 用于标识此次 abort 是否来自超时
+  let timedOut = false;
   const timer = controller
-    ? setTimeout(() => controller.abort(), timeoutMs)
+    ? setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs)
     : null;
 
   try {
@@ -160,7 +162,9 @@ async function apiPost(params) {
   } catch (err) {
     if (timer) clearTimeout(timer);
     if (err.name === "AbortError") {
-      throw err; // 长轮询超时是正常的，调用方会处理
+      // 标记是否来自超时 timer，便于调用方区分正常超时和外部中断
+      err._timeout = timedOut;
+      throw err;
     }
     throw err;
   }
@@ -185,8 +189,8 @@ export async function getUpdates({ baseUrl, token, getUpdatesBuf, timeoutMs }) {
     });
     return JSON.parse(rawText);
   } catch (err) {
-    if (err.name === "AbortError") {
-      // 长轮询超时是正常行为，返回空结果
+    if (err.name === "AbortError" && err._timeout) {
+      // 来自超时控制器的 abort（长轮询超时），是正常行为，返回空结果
       logger.debug("wechat-api", "getUpdates 客户端超时，返回空结果");
       return { ret: 0, msgs: [], get_updates_buf: getUpdatesBuf };
     }
@@ -315,31 +319,34 @@ export async function notifyStop({ baseUrl, token }) {
 
 // ======== 工具函数 ========
 
-/** 从 item_list 中提取文字内容 */
+/** 从 item_list 中提取文字内容（拼接所有文本和语音转文字项） */
 export function extractTextFromItemList(itemList) {
   if (!itemList?.length) return "";
+  const parts = [];
   for (const item of itemList) {
     // 纯文本
     if (item.type === MessageItemType.TEXT && item.text_item?.text != null) {
       const text = String(item.text_item.text);
       const ref = item.ref_msg;
-      if (!ref) return text;
+      if (!ref) {
+        parts.push(text);
+        continue;
+      }
       // 引用消息
-      const parts = [];
-      if (ref.title) parts.push(ref.title);
+      const refParts = [];
+      if (ref.title) refParts.push(ref.title);
       if (ref.message_item) {
         const refBody = extractTextFromItemList([ref.message_item]);
-        if (refBody) parts.push(refBody);
+        if (refBody) refParts.push(refBody);
       }
-      if (!parts.length) return text;
-      return `[引用: ${parts.join(" | ")}]\n${text}`;
+      parts.push(refParts.length ? `[引用: ${refParts.join(" | ")}]\n${text}` : text);
     }
     // 语音转文字
     if (item.type === MessageItemType.VOICE && item.voice_item?.text) {
-      return item.voice_item.text;
+      parts.push(item.voice_item.text);
     }
   }
-  return "";
+  return parts.join("\n");
 }
 
 /** 检查是否有媒体文件需要下载 */

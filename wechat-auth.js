@@ -121,7 +121,12 @@ async function apiGet(url, timeoutMs = 60000) {
 
 /**
  * 步骤 1：获取登录二维码
- * POST /ilink/bot/get_bot_qrcode?bot_type=3
+ * GET /ilink/bot/get_bot_qrcode?bot_type=3
+ *
+ * 返回字段说明：
+ *   qrcode              — UUID token，用于轮询状态
+ *   qrcode_img_content  — 微信可识别的绑定链接（URL），应生成二维码让用户扫描
+ *   qrcode_img_url      — 二维码图片 URL（可选）
  */
 async function getBotQrcode(baseUrl) {
   const url = `${baseUrl}/ilink/bot/get_bot_qrcode?bot_type=${BOT_TYPE}`;
@@ -129,15 +134,23 @@ async function getBotQrcode(baseUrl) {
 
   const resp = await apiGet(url, 15000);
 
-  logger.debug("wechat-auth", "getBotQrcode 响应", resp);
+  logger.debug("wechat-auth", "getBotQrcode 响应 keys", Object.keys(resp));
 
   if (resp.ret !== 0) {
     throw new Error(`获取二维码失败: ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`);
   }
 
+  // qrcode_img_content 是微信可识别的绑定链接（最关键的字段）
+  // 优先使用 qrcode_img_content，其次回退到 qrcode_img_url
+  const qrDisplayUrl = resp.qrcode_img_content || resp.qrcode_img_url || resp.qrcode_url;
+
+  if (!qrDisplayUrl) {
+    throw new Error("获取二维码失败: API 未返回二维码链接 (qrcode_img_content / qrcode_img_url)");
+  }
+
   return {
-    qrcodeUrl: resp.qrcode_url || resp.qrcode,
-    sessionKey: resp.session_key || resp.qrcode,
+    qrcodeUrl: qrDisplayUrl,
+    sessionKey: resp.qrcode || resp.session_key,
     message: resp.errmsg || "请扫描二维码",
   };
 }
@@ -210,8 +223,8 @@ export async function wechatQrLogin(opts = {}) {
 
       const resp = await pollQrcodeStatus(baseUrl, sessionKey);
 
-      // ★ 把原始响应打印到屏幕，方便排查 token 在哪个字段
-      console.log("[QR响应]", JSON.stringify(resp).slice(0, 500));
+      // 尝试多种可能的 token 字段名（debug 级别记录完整响应，生产环境不打印）
+      logger.debug("wechat-auth", "QR 响应字段", Object.keys(resp));
 
       // 尝试多种可能的 token 字段名
       const gotToken = resp.bot_token || resp.token || resp.data?.bot_token || resp.data?.token || resp.result?.bot_token;
@@ -245,6 +258,16 @@ export async function wechatQrLogin(opts = {}) {
       logger.info("wechat-auth", `QR 状态: ${status}`, JSON.stringify(resp).slice(0, 200));
 
       switch (status) {
+        case "confirmed":
+          // 即使 gotToken 为假，confirmed 也应该有 token
+          // 如果没有 token 但状态是 confirmed，说明响应格式异常
+          if (!gotToken) {
+            logger.warn("wechat-auth", "confirmed 状态但无 bot_token，完整响应", JSON.stringify(resp).slice(0, 500));
+            console.log("⚠️  扫码已确认，但未获取到 token，继续等待...");
+          }
+          // gotToken 已在上面的 if 分支处理并 break，这里不需要再做
+          break;
+
         case "wait":
           break;
 

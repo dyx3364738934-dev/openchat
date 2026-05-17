@@ -5,9 +5,9 @@
  */
 import { execSync } from "node:child_process";
 import { logger } from "./logger.js";
-import { getConfig } from "./config.js";
+import { getConfig, OC_PREFIX } from "./config.js";
 
-const OC = "OP" + "ENCODE_";
+const OC = OC_PREFIX;
 
 let _port = null;
 let _auth = null;
@@ -75,15 +75,26 @@ function headers() {
 // Session
 // ============================================================
 
+const MAX_SESSIONS = 100; // LRU 驱逐上限
 const sessions = new Map();
 const locks = new Map();
 
 async function getOrCreateSession(userId) {
+  // 已有 session 直接返回
   if (sessions.has(userId)) return sessions.get(userId);
-  if (locks.has(userId)) return locks.get(userId);
+
+  // 如果另一个并发请求正在创建 session，等待它完成后取结果
+  if (locks.has(userId)) {
+    await locks.get(userId);
+    // 等待完成后，创建方应该已经设置好了 sessions
+    if (sessions.has(userId)) return sessions.get(userId);
+    // 极端情况：创建方失败了，递归重试
+    return getOrCreateSession(userId);
+  }
 
   let resolveLock;
-  locks.set(userId, new Promise(r => { resolveLock = r; }));
+  const lock = new Promise(r => { resolveLock = r; });
+  locks.set(userId, lock);
 
   try {
     const base = await baseUrl();
@@ -101,10 +112,16 @@ async function getOrCreateSession(userId) {
 
     const s = await r.json();
     sessions.set(userId, s.id);
+    // LRU 驱逐：超过上限时删除最旧的条目
+    if (sessions.size > MAX_SESSIONS) {
+      const oldest = sessions.keys().next().value;
+      sessions.delete(oldest);
+      logger.info("opencode", "session LRU 驱逐", { evicted: oldest });
+    }
     logger.info("opencode", "session created", { userId, sid: s.id });
     return s.id;
   } finally {
-    resolveLock?.();
+    resolveLock();
     locks.delete(userId);
   }
 }
@@ -132,7 +149,13 @@ export async function sendToAgent(userId, text, opts = {}) {
       body: JSON.stringify({ agent: opts.agent || cfg.opencodeAgent || "build", model: { id: mid, providerID: pid } }),
       signal: AbortSignal.timeout(10000),
     });
-    if (r.ok) { const s = await r.json(); sessions.set(userId, s.id); }
+    if (r.ok) {
+      const s = await r.json();
+      sessions.set(userId, s.id);
+    } else {
+      const errText = await r.text().catch(() => "");
+      throw new Error(`切换模型/agent 时创建 session 失败 (HTTP ${r.status}): ${errText.slice(0, 200)}`);
+    }
   }
 
   const esid = encodeURIComponent(sid);

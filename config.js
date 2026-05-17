@@ -10,17 +10,17 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // env var 前缀（用拼接避免换行截断问题）
-const OC = "OP" + "ENCODE_";
+export const OC_PREFIX = "OP" + "ENCODE_";
 
 const ENV = {
   WECHAT_TOKEN: "WECHAT_TOKEN",
   WECHAT_BASE_URL: "WECHAT_BASE_URL",
   WECHAT_CDN_BASE_URL: "WECHAT_CDN_BASE_URL",
-  OC_API: OC + "API",
-  OC_PASSWORD: OC + "PASSWORD",
-  OC_AUTO_START: OC + "AUTO_START",
-  OC_AGENT: OC + "AGENT",
-  OC_MODEL: OC + "MODEL",
+  OC_API: OC_PREFIX + "API",
+  OC_PASSWORD: OC_PREFIX + "PASSWORD",
+  OC_AUTO_START: OC_PREFIX + "AUTO_START",
+  OC_AGENT: OC_PREFIX + "AGENT",
+  OC_MODEL: OC_PREFIX + "MODEL",
   LOG_DIR: "LOG_DIR",
   STATE_DIR: "STATE_DIR",
   ALLOW_FROM: "ALLOW_FROM",
@@ -30,6 +30,13 @@ const ENV = {
 
 function env(key, fallback) {
   return process.env[key] || fallback;
+}
+
+/** 将 allowFrom 配置规范化为字符串数组（支持 string 和 array 类型） */
+function normalizeAllowFrom(raw) {
+  if (Array.isArray(raw)) return raw.map(s => String(s).trim()).filter(Boolean);
+  if (typeof raw === "string") return raw.split(",").map(s => s.trim()).filter(Boolean);
+  return [];
 }
 
 function loadConfig() {
@@ -50,9 +57,11 @@ function loadConfig() {
     // OpenCode 配置
     opencodeApi: env(ENV.OC_API) || fc.opencodeApi || "http://127.0.0.1:4096",
     opencodePassword: env(ENV.OC_PASSWORD) || fc.opencodePassword || null,
-    opencodeAutoStart: env(ENV.OC_AUTO_START) !== undefined
-      ? env(ENV.OC_AUTO_START) !== "false"
-      : fc.opencodeAutoStart ?? true,
+    opencodeAutoStart: (() => {
+      const ev = env(ENV.OC_AUTO_START);
+      if (ev !== undefined && ev !== "") return ev.toLowerCase() !== "false" && ev !== "0";
+      return fc.opencodeAutoStart ?? true;
+    })(),
     opencodeAgent: env(ENV.OC_AGENT) || fc.opencodeAgent || null,
     opencodeModel: env(ENV.OC_MODEL) || fc.opencodeModel || null,
 
@@ -61,7 +70,7 @@ function loadConfig() {
     stateDir: env(ENV.STATE_DIR) || fc.stateDir || resolve(__dirname, "state"),
 
     // 业务配置
-    allowFrom: (env(ENV.ALLOW_FROM) || fc.allowFrom || "").split(",").map(s => s.trim()).filter(Boolean),
+    allowFrom: normalizeAllowFrom(env(ENV.ALLOW_FROM) || fc.allowFrom || []),
     botAgent: env(ENV.BOT_AGENT) || fc.botAgent || "WeChat-OpenCode-Bridge/1.0",
     longPollTimeoutMs: parseInt(env(ENV.LONG_POLL_TIMEOUT_MS)) || fc.longPollTimeoutMs || 35000,
   };

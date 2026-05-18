@@ -79,6 +79,19 @@ export function getContextToken(accountId, userId) {
   return contextTokenStore.get(contextTokenKey(accountId, userId));
 }
 
+/** 获取指定 account 下所有已保存的 userId 及其 context token */
+export function getAllContextTokens(accountId) {
+  const prefix = accountId + ":";
+  const result = [];
+  for (const [key, token] of contextTokenStore) {
+    if (key.startsWith(prefix)) {
+      const userId = key.slice(prefix.length);
+      result.push({ userId, token });
+    }
+  }
+  return result;
+}
+
 // ======== Sync Buffer Store ========
 
 function resolveSyncBufPath(accountId) {

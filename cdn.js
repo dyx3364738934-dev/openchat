@@ -96,6 +96,11 @@ export async function downloadAndDecrypt({ encryptQueryParam, aesKey, cdnBaseUrl
   }
 
   const encrypted = Buffer.from(await res.arrayBuffer());
+
+  if (encrypted.length === 0) {
+    throw new Error("CDN 加密数据为空（URL 可能已过期）");
+  }
+
   logger.info("cdn", "加密数据已下载", { size: encrypted.length });
 
   if (encrypted.length > MAX_MEDIA_SIZE * 1.5) {
@@ -104,6 +109,9 @@ export async function downloadAndDecrypt({ encryptQueryParam, aesKey, cdnBaseUrl
   }
 
   const decrypted = decryptAesEcb(encrypted, key);
+  if (decrypted.length === 0) {
+    throw new Error("解密后数据为空");
+  }
   logger.info("cdn", "解密完成", { size: decrypted.length });
 
   return decrypted;
@@ -123,6 +131,11 @@ export async function downloadDirect(url) {
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());
+
+  // 空响应检查：CDN URL 过期或重定向到错误页面时可能返回 0 字节或非图片内容
+  if (buffer.length === 0) {
+    throw new Error("直接下载返回空数据（CDN URL 可能已过期）");
+  }
   if (buffer.length > MAX_MEDIA_SIZE) {
     throw new Error(`媒体文件过大 (${(buffer.length / 1024 / 1024).toFixed(1)}MB)，跳过`);
   }
@@ -132,6 +145,19 @@ export async function downloadDirect(url) {
 }
 
 // ======== 工具函数 ========
+
+/**
+ * 从 CDN URL 中提取 encrypted_query_param 的值
+ * 如 https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=UEkx...
+ * @param {string} url - 包含加密参数的 URL
+ * @returns {string|null} 提取出的参数值
+ */
+function extractEncryptParam(url) {
+  if (!url) return null;
+  // 匹配 encrypted_query_param= 后面的值（到 & 或串尾）
+  const m = url.match(/[?&]encrypted_query_param=([^&]+)/i);
+  return m ? m[1] : null;
+}
 
 /**
  * 从 Buffer 魔数检测图片 MIME 类型
@@ -174,31 +200,78 @@ export async function extractImageFromItems(itemList) {
     const img = item.image_item;
     if (!img) continue;
 
+    // 详细日志记录 image_item 结构以便调试
+    logger.info("cdn", "图片下载 - image_item 结构", {
+      url: img.url ? img.url.slice(0, 80) + "..." : null,
+      hasMedia: !!img.media,
+      mediaKeys: img.media ? Object.keys(img.media) : [],
+      aeskey: img.aeskey ? img.aeskey.slice(0, 8) + "..." : (img.aes_key ? img.aes_key.slice(0, 8) + "..." : null),
+      mediaAesKey: img.media?.aes_key ? img.media.aes_key.slice(0, 8) + "..." : null,
+      imgKeys: Object.keys(img),
+    });
+
     try {
       let buffer;
 
-      // 优先使用直接 URL（不需要解密）
-      if (img.url) {
+      // 检查 URL 是否是加密 CDN 链接（含 encrypted_query_param）
+      const isEncryptedUrl = img.url && /encrypted[_-]query[_-]param/i.test(img.url);
+
+      // 优先使用非加密的直接 URL（full_url 或不含加密参数的 url）
+      if (img.url && !isEncryptedUrl) {
+        // img.url 是真正的直接下载链接，不需要解密
         buffer = await downloadDirect(img.url);
-      } else if (img.media?.full_url) {
+      } else if (img.media?.full_url && !/encrypted[_-]query[_-]param/i.test(img.media.full_url)) {
+        // media.full_url 是直接链接
         buffer = await downloadDirect(img.media.full_url);
-      } else if (img.media?.encrypt_query_param) {
-        // CDN 加密下载：aesKey 可能在 media.aes_key 或 img.aeskey
-        const aesKey = img.media.aes_key || img.aeskey;
+      } else if (isEncryptedUrl || img.media?.encrypt_query_param) {
+        // 加密 CDN 下载：从 URL 中提取 encrypt_query_param，或使用 media 的字段
+        const encryptQueryParam = isEncryptedUrl
+          ? extractEncryptParam(img.url)
+          : img.media.encrypt_query_param;
+        // aesKey 可能在 media.aes_key / img.aeskey / img.aes_key
+        const aesKey = img.media?.aes_key || img.aeskey || img.aes_key;
         if (!aesKey) {
-          logger.warn("cdn", "图片缺少 aes_key，跳过下载");
+          logger.warn("cdn", "加密图片缺少 aes_key，跳过下载", {
+            hasUrl: !!img.url,
+            hasMedia: !!img.media,
+            imageKeys: Object.keys(img),
+            mediaKeys: img.media ? Object.keys(img.media) : [],
+          });
+          continue;
+        }
+        if (!encryptQueryParam) {
+          logger.warn("cdn", "加密图片缺少 encrypt_query_param，跳过下载");
           continue;
         }
         buffer = await downloadAndDecrypt({
-          encryptQueryParam: img.media.encrypt_query_param,
+          encryptQueryParam,
           aesKey,
         });
+      } else if (img.url) {
+        // 有 url 但无法确定是否加密，尝试直接下载
+        buffer = await downloadDirect(img.url);
       } else {
         logger.warn("cdn", "图片没有可用的下载方式", { imageKeys: Object.keys(img) });
         continue;
       }
 
       const mime = detectImageMime(buffer);
+
+      // 验证图片数据有效性：至少要有正确的文件头魔数
+      const isValidImage = (mime === "image/png" && buffer[0] === 0x89)
+        || (mime === "image/jpeg" && buffer[0] === 0xff && buffer[1] === 0xd8)
+        || (mime === "image/gif" && buffer[0] === 0x47)
+        || (mime === "image/webp");
+      if (!isValidImage) {
+        logger.warn("cdn", "下载的数据不是有效图片格式", { mime, sizeBytes: buffer.length, header: buffer.slice(0, 8).toString("hex") });
+        continue;
+      }
+      // 至少 100 字节才是有效图片（过小可能是损坏/空响应）
+      if (buffer.length < 100) {
+        logger.warn("cdn", "图片数据太小，可能损坏", { sizeBytes: buffer.length });
+        continue;
+      }
+
       const base64 = buffer.toString("base64");
       const dataUrl = `data:${mime};base64,${base64}`;
 

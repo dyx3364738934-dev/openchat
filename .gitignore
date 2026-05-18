@@ -2,5 +2,7 @@ node_modules/
 logs/
 state/
 config.json
-.bridge-state.json
+.bride-state.json
 *.log
+broken-models.json
+prompt.txt

@@ -5,7 +5,7 @@
  */
 import { execSync } from "node:child_process";
 import { logger } from "./logger.js";
-import { getConfig, OC_PREFIX } from "./config.js";
+import { getConfig, getSystemPrompt, OC_PREFIX } from "./config.js";
 
 const OC = OC_PREFIX;
 
@@ -102,10 +102,12 @@ async function getOrCreateSession(userId) {
     const cfg = getConfig();
     const mid = cfg.opencodeModel || "deepseek-v4-pro";
     const pid = mid.includes("/") ? mid.split("/")[0] : "deepseek";
+    // API 的 model.id 不含 provider 前缀
+    const modelId = mid.includes("/") ? mid.split("/").slice(1).join("/") : mid;
 
     const r = await fetch(base + "/session", {
       method: "POST", headers: h,
-      body: JSON.stringify({ agent: cfg.opencodeAgent || "build", model: { id: mid, providerID: pid } }),
+      body: JSON.stringify({ agent: cfg.opencodeAgent || "build", model: { id: modelId, providerID: pid } }),
       signal: AbortSignal.timeout(10000),
     });
     if (!r.ok) throw new Error("session create HTTP " + r.status);
@@ -146,6 +148,11 @@ function buildParts(text, mediaParts) {
     parts.push({ type: "text", text });
   }
   for (const mp of mediaParts) {
+    // 验证 data URL 基本格式，避免发送无效数据
+    if (!mp.url || !mp.url.startsWith("data:")) {
+      logger.warn("opencode", "跳过无效的 mediaPart（url 非空且非 data: 格式）", { urlPrefix: (mp.url || "").slice(0, 30) });
+      continue;
+    }
     parts.push({
       type: "file",
       mime: mp.mime || "image/jpeg",
@@ -159,30 +166,46 @@ function buildParts(text, mediaParts) {
 export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
   const base = await baseUrl();
   const h = headers();
-  const sid = await getOrCreateSession(userId);
+  const cfg = getConfig();
 
-  // 切换 model/agent 时重建 session
-  if (opts.model || opts.agent) {
-    const cfg = getConfig();
-    const mid = opts.model || cfg.opencodeModel || "deepseek-v4-pro";
-    const pid = mid.includes("/") ? mid.split("/")[0] : "deepseek";
+  // 确定要使用的模型
+  const targetModel = opts.model || cfg.opencodeModel || "deepseek-v4-pro";
+  const targetAgent = opts.agent || cfg.opencodeAgent || "build";
+
+  // 如果指定了模型/agent（非默认），直接创建新 session 而不走缓存
+  let sid;
+  if ((opts.model && opts.model !== (cfg.opencodeModel || "deepseek-v4-pro")) || opts.agent) {
+    const pid = targetModel.includes("/") ? targetModel.split("/")[0] : "deepseek";
+    // API 的 model.id 不含 provider 前缀，如 "big-pickle" 而非 "opencode/big-pickle"
+    const modelId = targetModel.includes("/") ? targetModel.split("/").slice(1).join("/") : targetModel;
+    logger.info("opencode", "创建专用 session", { userId, model: targetModel, modelId, providerID: pid });
     const r = await fetch(base + "/session", {
       method: "POST", headers: h,
-      body: JSON.stringify({ agent: opts.agent || cfg.opencodeAgent || "build", model: { id: mid, providerID: pid } }),
+      body: JSON.stringify({ agent: targetAgent, model: { id: modelId, providerID: pid } }),
       signal: AbortSignal.timeout(10000),
     });
     if (r.ok) {
       const s = await r.json();
-      sessions.set(userId, s.id);
+      sid = s.id;
     } else {
       const errText = await r.text().catch(() => "");
-      throw new Error(`切换模型/agent 时创建 session 失败 (HTTP ${r.status}): ${errText.slice(0, 200)}`);
+      throw new Error(`创建 session 失败 (HTTP ${r.status}): ${errText.slice(0, 200)}`);
     }
+  } else {
+    sid = await getOrCreateSession(userId);
   }
 
   const esid = encodeURIComponent(sid);
   const parts = buildParts(text, mediaParts);
-  logger.info("opencode", "send", { userId, sid, textLen: text.length, mediaCount: mediaParts.length });
+  const mediaInfo = mediaParts.map(m => ({ mime: m.mime, urlLen: (m.url || "").length }));
+  logger.info("opencode", "send", { userId, sid, model: targetModel, textLen: text.length, mediaCount: mediaParts.length, media: mediaInfo, hasSystemPrompt: !!getSystemPrompt() });
+
+  // 构建请求体，支持 system 提示词注入
+  const systemPrompt = getSystemPrompt();
+  const body = {
+    parts,
+    ...(systemPrompt ? { system: systemPrompt } : {}),
+  };
 
   const ctrl = new AbortController();
   const tm = setTimeout(() => ctrl.abort(), 300_000);
@@ -190,7 +213,7 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
   try {
     const res = await fetch(base + "/session/" + esid + "/message", {
       method: "POST", headers: h,
-      body: JSON.stringify({ parts }),
+      body: JSON.stringify(body),
       signal: ctrl.signal,
     });
     clearTimeout(tm);
@@ -198,9 +221,22 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
       if (res.status === 404) {
-        sessions.delete(userId);
-        const newSid = await getOrCreateSession(userId);
-        const r2 = await fetch(base + "/session/" + encodeURIComponent(newSid) + "/message", {
+        // session 过期，用同模型重建
+        const pid = targetModel.includes("/") ? targetModel.split("/")[0] : "deepseek";
+        const modelId = targetModel.includes("/") ? targetModel.split("/").slice(1).join("/") : targetModel;
+        const r1 = await fetch(base + "/session", {
+          method: "POST", headers: h,
+          body: JSON.stringify({ agent: targetAgent, model: { id: modelId, providerID: pid } }),
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!r1.ok) {
+          const retryErr = await r1.text().catch(() => "");
+          throw new Error(`重建 session 失败 (HTTP ${r1.status}): ${retryErr.slice(0, 200)}`);
+        }
+        const s1 = await r1.json();
+        sid = s1.id;
+        sessions.set(userId, sid);
+        const r2 = await fetch(base + "/session/" + encodeURIComponent(sid) + "/message", {
           method: "POST", headers: h,
           body: JSON.stringify({ parts }),
           signal: AbortSignal.timeout(300_000),

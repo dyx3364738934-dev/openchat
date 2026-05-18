@@ -21,6 +21,8 @@ const ENV = {
   OC_AUTO_START: OC_PREFIX + "AUTO_START",
   OC_AGENT: OC_PREFIX + "AGENT",
   OC_MODEL: OC_PREFIX + "MODEL",
+  OC_VISION_MODEL: OC_PREFIX + "VISION_MODEL",
+  OC_SYSTEM_PROMPT: OC_PREFIX + "SYSTEM_PROMPT",
   LOG_DIR: "LOG_DIR",
   STATE_DIR: "STATE_DIR",
   ALLOW_FROM: "ALLOW_FROM",
@@ -64,6 +66,21 @@ function loadConfig() {
     })(),
     opencodeAgent: env(ENV.OC_AGENT) || fc.opencodeAgent || null,
     opencodeModel: env(ENV.OC_MODEL) || fc.opencodeModel || null,
+    // 图片消息使用的视觉模型（支持 vision 的模型）
+    // 推荐值: "google/gemini-2.5-flash" (稳定支持图片识别，需 Google API key)
+    // 设置方法: env OPENCODE_VISION_MODEL=google/gemini-2.5-flash 或 config.json 中 opencodeVisionModel
+    // 不设置则用默认模型发图（deepseek 等不支持图片识别）
+    opencodeVisionModel: env(ENV.OC_VISION_MODEL) || fc.opencodeVisionModel || null,
+
+    // 系统提示词：注入到每条消息中，定义 AI 的人格和行为准则
+    // 支持三种写法:
+    //   1. 环境变量: OPENCODE_SYSTEM_PROMPT="你是微信助手..."
+    //   2. config.json: { "opencodeSystemPrompt": "你是微信助手..." }
+    //   3. 文件引用: { "opencodeSystemPromptFile": "prompt.txt" } 或 OPENCODE_SYSTEM_PROMPT_FILE=prompt.txt
+    //      文件路径相对于 config.json 所在目录，支持多行和 Markdown
+    // 不设置则不注入额外提示词
+    opencodeSystemPrompt: env(ENV.OC_SYSTEM_PROMPT) || fc.opencodeSystemPrompt || null,
+    opencodeSystemPromptFile: fc.opencodeSystemPromptFile || null,
 
     // 路径
     logDir: env(ENV.LOG_DIR) || fc.logDir || resolve(__dirname, "logs"),
@@ -91,6 +108,7 @@ export function saveToken(token) {
 }
 
 let _config = null;
+let _systemPrompt = null;
 
 export function getConfig() {
   if (!_config) {
@@ -103,5 +121,51 @@ export function getConfig() {
 
 export function reloadConfig() {
   _config = null;
+  _systemPrompt = null;
   return getConfig();
+}
+
+/**
+ * 获取系统提示词（优先级: 环境变量 > config.json 直接值 > 文件引用）
+ * 文件内容会被缓存，直到 reloadConfig() 被调用
+ * @returns {string|null} 系统提示词内容，未配置则返回 null
+ */
+export function getSystemPrompt() {
+  if (_systemPrompt !== null) return _systemPrompt || null;
+
+  const cfg = getConfig();
+
+  // 优先级 1: 环境变量
+  const envPrompt = process.env[ENV.OC_SYSTEM_PROMPT];
+  if (envPrompt) {
+    _systemPrompt = envPrompt;
+    return _systemPrompt;
+  }
+
+  // 优先级 2: config.json 直接值
+  if (cfg.opencodeSystemPrompt) {
+    _systemPrompt = cfg.opencodeSystemPrompt;
+    return _systemPrompt;
+  }
+
+  // 优先级 3: 文件引用
+  if (cfg.opencodeSystemPromptFile) {
+    const filePath = resolve(__dirname, cfg.opencodeSystemPromptFile);
+    if (existsSync(filePath)) {
+      try {
+        _systemPrompt = readFileSync(filePath, "utf-8").trim();
+        console.log(`📋 系统提示词已从 ${cfg.opencodeSystemPromptFile} 加载 (${_systemPrompt.length} 字符)`);
+        return _systemPrompt;
+      } catch (err) {
+        console.warn(`系统提示词文件加载失败: ${err.message}`);
+        return null;
+      }
+    } else {
+      console.warn(`系统提示词文件不存在: ${filePath}`);
+      return null;
+    }
+  }
+
+  _systemPrompt = ""; // 标记为已检查，避免重复文件 IO
+  return null;
 }

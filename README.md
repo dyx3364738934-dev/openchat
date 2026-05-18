@@ -4,19 +4,19 @@
 
 ## 一键安装
 
-在 OpenCode 终端里（按 `Ctrl+`` 打开）依次运行：
+在 OpenCode 终端里（按 `` Ctrl+` `` 打开）粘贴以下命令：
 
-```bash
-cd ~/Desktop && git clone https://github.com/dyx3364738934-dev/openchat.git && cd openchat && npm install && copy config.example.json config.json && echo 你在微信环境里和用户聊天。回复要像微信消息一样简短自然。> prompt.txt && openchat
+```powershell
+cd "$HOME\Desktop"; git clone https://github.com/dyx3364738934-dev/openchat.git; cd openchat; npm install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你在微信环境里和用户聊天。回复要像微信消息一样简短自然。'; node bridge.js
 ```
 
 首次运行会弹二维码图片，用微信扫码登录。之后再次启动只需：
 
-```bash
-cd ~/Desktop/openchat && openchat
+```powershell
+cd "$HOME\Desktop\openchat"; node bridge.js
 ```
 
-> 如果 `openchat` 命令不可用，双击 `setup.bat` 一次即可注册到 PATH。
+> 如果你想用 `openchat` 命令启动，双击项目里的 `setup.bat` 一次即可注册到 PATH。
 
 ---
 

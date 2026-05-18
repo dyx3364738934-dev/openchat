@@ -2,21 +2,51 @@
 
 微信 ↔ OpenCode Agent 桥 —— 用微信消息控制你的 AI Agent。
 
-## 一键安装
+## 安装
 
-在 OpenCode 终端里（按 `` Ctrl+` `` 打开）粘贴以下命令：
+### 方法一：一键命令（推荐）
 
-```powershell
-cd "$HOME\Desktop"; git clone https://github.com/dyx3364738934-dev/openchat.git; cd openchat; npm install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你在微信环境里和用户聊天。回复要像微信消息一样简短自然。'; node bridge.js
-```
-
-首次运行会弹二维码图片，用微信扫码登录。之后再次启动只需：
+在终端里粘贴下面这一行，回车即装即用：
 
 ```powershell
-cd "$HOME\Desktop\openchat"; node bridge.js
+Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你在微信环境里和用户聊天。回复要像微信消息一样简短自然。'; node bridge.js
 ```
 
-> 如果你想用 `openchat` 命令启动，双击项目里的 `setup.bat` 一次即可注册到 PATH。
+首次运行会弹二维码图片，用微信扫码登录。
+
+之后再次启动：
+
+```powershell
+Set-Location "$HOME\Desktop\openchat"; node bridge.js
+```
+
+### 方法二：手动安装
+
+> 如果你已经有 git 并且 npm 能正常运行，也可以用 git：
+
+```bash
+git clone https://github.com/dyx3364738934-dev/openchat.git
+cd openchat
+npm install
+copy config.example.json config.json
+echo 你在微信环境里和用户聊天。回复要像微信消息一样简短自然。> prompt.txt
+node bridge.js
+```
+
+### 常见安装问题
+
+**npm 报 "禁止运行脚本" / PSSecurityException：**  
+PowerShell 执行策略限制，改用 `npm.cmd` 代替 `npm`：
+
+```powershell
+npm.cmd install
+```
+
+**git 不是有效命令：**  
+没装 git。用方法一（ZIP 下载）即可，不需要 git。
+
+**Node.js 没装：**  
+去 [nodejs.org](https://nodejs.org/) 下载 v18+ 安装。
 
 ---
 

@@ -25,7 +25,8 @@ import { getConfig, saveToken, getSystemPrompt, OC_PREFIX } from "./config.js";
 import { logger } from "./logger.js";
 import { wechatQrLogin } from "./wechat-auth.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getUpdates,
   sendMessage,
@@ -330,7 +331,8 @@ return `未找到 "${choice}"，先 /model 看列表，再选序号或输入全�
 }
 
 // ======== 坏模型持久化缓存 ========
-const BROKEN_MODELS_FILE = resolve(import.meta.dirname || ".", "broken-models.json");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const BROKEN_MODELS_FILE = resolve(__dirname, "broken-models.json");
 
 /** 从文件加载坏模型列表 */
 function loadBrokenModels() {

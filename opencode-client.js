@@ -100,10 +100,14 @@ async function getOrCreateSession(userId, model) {
     await locks.get(key);
     // 等待完成后，创建方应该已经设置好了 sessions
     if (sessions.has(key)) return sessions.get(key);
-    // 极端情况：创建方失败了，递归重试
-    return getOrCreateSession(userId, model);
+    // 极端情况：创建方失败了，重试一次（非递归）
+    return _createSession(userId, model, key);
   }
 
+  return _createSession(userId, model, key);
+}
+
+async function _createSession(userId, model, key) {
   let resolveLock;
   const lock = new Promise(r => { resolveLock = r; });
   locks.set(key, lock);
@@ -114,7 +118,6 @@ async function getOrCreateSession(userId, model) {
     const cfg = getConfig();
     const mid = model || cfg.opencodeModel || "deepseek-v4-pro";
     const pid = mid.includes("/") ? mid.split("/")[0] : "deepseek";
-    // API 的 model.id 不含 provider 前缀
     const modelId = mid.includes("/") ? mid.split("/").slice(1).join("/") : mid;
 
     const r = await fetch(base + "/session", {
@@ -126,7 +129,7 @@ async function getOrCreateSession(userId, model) {
 
     const s = await r.json();
     sessions.set(key, s.id);
-    // LRU 驱逐：超过上限时删除最旧的条目
+    // LRU 驱逐
     if (sessions.size > MAX_SESSIONS) {
       const oldest = sessions.keys().next().value;
       sessions.delete(oldest);
@@ -311,7 +314,7 @@ export async function sendToAgentStreaming(userId, text, opts = {}, mediaParts =
   try { return await _streamingRequest(base, h, sid, esid, body, streamOpts); }
   catch (streamErr) {
     logger.info("opencode", "SSE 流式失败，回退同步", { err: streamErr.message });
-    return await _syncRequest(base, h, sid, esid, body);
+    return await _syncRequest(base, h, sid, esid, body, userId, targetModel);
   }
 }
 
@@ -399,7 +402,7 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
 }
 
 /** 同步请求（流式失败的回退） */
-async function _syncRequest(base, h, sid, esid, body) {
+async function _syncRequest(base, h, sid, esid, body, userId, targetModel) {
   const ctrl = new AbortController();
   const tm = setTimeout(() => ctrl.abort(), 600_000);
   try {
@@ -407,7 +410,16 @@ async function _syncRequest(base, h, sid, esid, body) {
       method: "POST", headers: h, body: JSON.stringify(body), signal: ctrl.signal,
     });
     clearTimeout(tm);
-    if (!res.ok) { const eb = await res.text().catch(() => ""); throw new Error(`HTTP ${res.status}: ${eb.slice(0, 300)}`); }
+    if (!res.ok) {
+      const eb = await res.text().catch(() => "");
+      // 404: session 过期，清除缓存（重建由下次 getOrCreateSession 自动完成）
+      if (res.status === 404 && userId) {
+        const key = sessionKey(userId, targetModel);
+        sessions.delete(key);
+        logger.info("opencode", "session 过期，已清除缓存", { userId, model: targetModel });
+      }
+      throw new Error(`HTTP ${res.status}: ${eb.slice(0, 300)}`);
+    }
     const r = await res.json();
     const reply = (r.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
     logger.info("opencode", "sync ok", { sid, len: reply.length });

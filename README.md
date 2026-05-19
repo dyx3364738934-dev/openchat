@@ -106,19 +106,7 @@ openchat
 
 或在微信里发 `/model` 查看、切换。免费模型标 🆓。
 
-### 3. 视觉模型（图片识别）
-
-想让发图时自动切换到支持视觉的模型：
-
-```json
-{
-  "opencodeVisionModel": "google/gemini-2.5-flash"
-}
-```
-
-配置后，收到图片会自动用这个模型处理，文字消息仍然用默认模型。
-
-### 4. 白名单限制
+### 3. 白名单限制
 
 只允许特定微信用户使用：
 
@@ -130,7 +118,7 @@ openchat
 
 留空数组或不设置 = 允许所有人。
 
-### 5. 完整 config.json 参考
+### 4. 完整 config.json 参考
 
 把 `config.example.json` 复制为 `config.json` 后修改：
 
@@ -139,7 +127,6 @@ openchat
   "wechatToken": "",
   "opencodeAgent": "build",
   "opencodeModel": "deepseek/deepseek-v4-pro",
-  "opencodeVisionModel": "",
   "opencodeSystemPromptFile": "prompt.txt",
   "allowFrom": []
 }
@@ -149,7 +136,6 @@ openchat
 |------|----------|--------|------|
 | `wechatToken` | `WECHAT_TOKEN` | 自动保存 | 微信机器人 token，扫码后自动填 |
 | `opencodeModel` | `OPENCODE_MODEL` | `deepseek-v4-pro` | 默认模型 |
-| `opencodeVisionModel` | `OPENCODE_VISION_MODEL` | 无 | 图片识别用的视觉模型 |
 | `opencodeAgent` | `OPENCODE_AGENT` | `build` | OpenCode agent 类型 |
 | `opencodeSystemPrompt` | `OPENCODE_SYSTEM_PROMPT` | 无 | 系统提示词（直接文本） |
 | `opencodeSystemPromptFile` | — | `prompt.txt` | 系统提示词文件路径 |
@@ -179,8 +165,7 @@ openchat
 直接在微信里发图片，桥会：
 1. 自动下载微信 CDN 图片
 2. AES-128-ECB 解密（加密图片）
-3. 如果配了 `opencodeVisionModel`，自动切到视觉模型识别
-4. 如果视觉模型失败，降级为文字描述 `[用户发送了一张图片]`
+3. 当前模型不支持图片时，降级为文字描述 `[用户发送了一张图片]`
 
 ---
 
@@ -252,7 +237,6 @@ openchat/
 - 🆓 免费模型自动标记：列表中标注 🆓 免费模型
 - 🔍 启动时免费模型探针：只测 session 创建（不消耗 token），自动发现不可用模型
 - ♻️ 坏模型自动恢复检测：之前报错的模型重新测试，恢复后自动移出黑名单
-- 🖼️ 视觉模型自动切换：配了 `opencodeVisionModel` 后，发图自动切模型，文字消息切回
 - ⚡ 友好错误提示：HTTP 错误翻译成中文，保留技术详情
 - 🗑️ 探测后自动清理：创建的测试 session 立即删除，不浪费资源
 

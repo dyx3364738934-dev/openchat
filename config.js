@@ -158,20 +158,13 @@ export function getSystemPrompt() {
 
   const cfg = getConfig();
 
-  // 优先级 1: 环境变量
-  const envPrompt = process.env[ENV.OC_SYSTEM_PROMPT];
-  if (envPrompt) {
-    _systemPrompt = envPrompt;
-    return _systemPrompt;
-  }
-
-  // 优先级 2: config.json 直接值
+  // 优先级 1: opencodeSystemPrompt 已合并 env+config.json
   if (cfg.opencodeSystemPrompt) {
     _systemPrompt = cfg.opencodeSystemPrompt;
     return _systemPrompt;
   }
 
-  // 优先级 3: 文件引用
+  // 优先级 2: 文件引用
   if (cfg.opencodeSystemPromptFile) {
     const filePath = resolve(__dirname, cfg.opencodeSystemPromptFile);
     if (existsSync(filePath)) {

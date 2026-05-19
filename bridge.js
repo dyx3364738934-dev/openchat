@@ -768,19 +768,6 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
 
   const startTime = Date.now();
 
-  // 进度提示：每 30 秒给用户发一条"正在思考中..."，避免用户以为卡死
-  let progressTimer = null;
-  let progressCount = 0;
-  const PROGRESS_INTERVAL_MS = 30_000; // 30 秒
-  const progressTick = () => {
-    progressCount++;
-    const dots = ".".repeat(Math.min(progressCount, 5));
-    sendMessage({ baseUrl, token, toUserId: userId, text: `⏳ 正在思考中${dots}`, contextToken })
-      .catch(() => {}); // 发送失败无所谓
-    progressTimer = setTimeout(progressTick, PROGRESS_INTERVAL_MS);
-  };
-  progressTimer = setTimeout(progressTick, PROGRESS_INTERVAL_MS);
-
   try {
     // 调用 OpenCode agent（优先流式，失败回退同步）
     const cfg = getConfig();
@@ -801,9 +788,6 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
       result = await sendToAgent(userId, text, { ...prefs, ...agentOpts }, mediaParts);
     }
     const aiMs = Date.now() - startTime;
-
-    // 停止进度提示
-    if (progressTimer) clearTimeout(progressTimer);
 
     // Markdown 过滤
     const filter = new StreamingMarkdownFilter();
@@ -831,8 +815,6 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
 
     console.log(`✅ 回复已发送 → ${userId} (${aiMs}ms, ${chunks.length}段${mediaParts.length ? ", 📷" : ""})`);
   } catch (err) {
-    // 停止进度提示
-    if (progressTimer) clearTimeout(progressTimer);
     logger.error("bridge", "处理消息失败", err);
 
     // 如果带图片发送失败，尝试降级为纯文字
@@ -907,7 +889,6 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
     }
   } finally {
     // 确保进度提示也被清除
-    if (progressTimer) clearTimeout(progressTimer);
     if (typingTicket) {
       await sendTyping({
         baseUrl,

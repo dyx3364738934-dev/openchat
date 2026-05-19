@@ -76,31 +76,37 @@ function headers() {
 // ============================================================
 
 const MAX_SESSIONS = 100; // LRU 驱逐上限
-const sessions = new Map();
+const sessions = new Map(); // key: "userId:modelId" → sessionId
 const locks = new Map();
 
-async function getOrCreateSession(userId) {
+/** 生成 session 缓存 key，包含模型信息以避免切换模型时覆盖 session */
+function sessionKey(userId, model) {
+  return `${userId}:${model || "default"}`;
+}
+
+async function getOrCreateSession(userId, model) {
   // 已有 session 直接返回
-  if (sessions.has(userId)) return sessions.get(userId);
+  const key = sessionKey(userId, model);
+  if (sessions.has(key)) return sessions.get(key);
 
   // 如果另一个并发请求正在创建 session，等待它完成后取结果
-  if (locks.has(userId)) {
-    await locks.get(userId);
+  if (locks.has(key)) {
+    await locks.get(key);
     // 等待完成后，创建方应该已经设置好了 sessions
-    if (sessions.has(userId)) return sessions.get(userId);
+    if (sessions.has(key)) return sessions.get(key);
     // 极端情况：创建方失败了，递归重试
-    return getOrCreateSession(userId);
+    return getOrCreateSession(userId, model);
   }
 
   let resolveLock;
   const lock = new Promise(r => { resolveLock = r; });
-  locks.set(userId, lock);
+  locks.set(key, lock);
 
   try {
     const base = await baseUrl();
     const h = headers();
     const cfg = getConfig();
-    const mid = cfg.opencodeModel || "deepseek-v4-pro";
+    const mid = model || cfg.opencodeModel || "deepseek-v4-pro";
     const pid = mid.includes("/") ? mid.split("/")[0] : "deepseek";
     // API 的 model.id 不含 provider 前缀
     const modelId = mid.includes("/") ? mid.split("/").slice(1).join("/") : mid;
@@ -113,27 +119,33 @@ async function getOrCreateSession(userId) {
     if (!r.ok) throw new Error("session create HTTP " + r.status);
 
     const s = await r.json();
-    sessions.set(userId, s.id);
+    sessions.set(key, s.id);
     // LRU 驱逐：超过上限时删除最旧的条目
     if (sessions.size > MAX_SESSIONS) {
       const oldest = sessions.keys().next().value;
       sessions.delete(oldest);
       logger.info("opencode", "session LRU 驱逐", { evicted: oldest });
     }
-    logger.info("opencode", "session created", { userId, sid: s.id });
+    logger.info("opencode", "session created", { userId, model: mid, sid: s.id });
     return s.id;
   } finally {
     resolveLock();
-    locks.delete(userId);
+    locks.delete(key);
   }
 }
 
-// ============================================================
+  // ============================================================
 // 核心
 // ============================================================
 
-export async function resetSession(userId) {
-  sessions.delete(userId);
+export async function resetSession(userId, model) {
+  // 清除该用户的所有 session（不限模型）
+  const prefix = `${userId}:`;
+  for (const key of sessions.keys()) {
+    if (key.startsWith(prefix) || key === userId) {
+      sessions.delete(key);
+    }
+  }
 }
 
 /**
@@ -172,27 +184,13 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
   const targetModel = opts.model || cfg.opencodeModel || "deepseek-v4-pro";
   const targetAgent = opts.agent || cfg.opencodeAgent || "build";
 
-  // 如果指定了模型/agent（非默认），直接创建新 session 而不走缓存
+  // 用带模型信息的 key 获取或创建 session，切换模型不会覆盖之前的 session
   let sid;
-  if ((opts.model && opts.model !== (cfg.opencodeModel || "deepseek-v4-pro")) || opts.agent) {
-    const pid = targetModel.includes("/") ? targetModel.split("/")[0] : "deepseek";
-    // API 的 model.id 不含 provider 前缀，如 "big-pickle" 而非 "opencode/big-pickle"
-    const modelId = targetModel.includes("/") ? targetModel.split("/").slice(1).join("/") : targetModel;
-    logger.info("opencode", "创建专用 session", { userId, model: targetModel, modelId, providerID: pid });
-    const r = await fetch(base + "/session", {
-      method: "POST", headers: h,
-      body: JSON.stringify({ agent: targetAgent, model: { id: modelId, providerID: pid } }),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (r.ok) {
-      const s = await r.json();
-      sid = s.id;
-    } else {
-      const errText = await r.text().catch(() => "");
-      throw new Error(`创建 session 失败 (HTTP ${r.status}): ${errText.slice(0, 200)}`);
-    }
-  } else {
-    sid = await getOrCreateSession(userId);
+  try {
+    sid = await getOrCreateSession(userId, targetModel);
+  } catch (err) {
+    // session 创建失败，可能是模型不可用
+    throw new Error(`创建 session 失败: ${err.message}`);
   }
 
   const esid = encodeURIComponent(sid);
@@ -221,24 +219,18 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
       if (res.status === 404) {
-        // session 过期，用同模型重建
-        const pid = targetModel.includes("/") ? targetModel.split("/")[0] : "deepseek";
-        const modelId = targetModel.includes("/") ? targetModel.split("/").slice(1).join("/") : targetModel;
-        const r1 = await fetch(base + "/session", {
-          method: "POST", headers: h,
-          body: JSON.stringify({ agent: targetAgent, model: { id: modelId, providerID: pid } }),
-          signal: AbortSignal.timeout(10000),
-        });
-        if (!r1.ok) {
-          const retryErr = await r1.text().catch(() => "");
-          throw new Error(`重建 session 失败 (HTTP ${r1.status}): ${retryErr.slice(0, 200)}`);
+        // session 过期，清除缓存并重建
+        const key = sessionKey(userId, targetModel);
+        sessions.delete(key);
+        logger.info("opencode", "session 过期，重建", { userId, model: targetModel, oldSid: sid });
+        try {
+          sid = await getOrCreateSession(userId, targetModel);
+        } catch (retryErr) {
+          throw new Error(`重建 session 失败: ${retryErr.message}`);
         }
-        const s1 = await r1.json();
-        sid = s1.id;
-        sessions.set(userId, sid);
         const r2 = await fetch(base + "/session/" + encodeURIComponent(sid) + "/message", {
           method: "POST", headers: h,
-          body: JSON.stringify({ parts }),
+          body: JSON.stringify(body),
           signal: AbortSignal.timeout(300_000),
         });
         if (!r2.ok) {

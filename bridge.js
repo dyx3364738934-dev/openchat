@@ -941,7 +941,7 @@ async function mainLoop({ token, baseUrl }) {
       const { userId: firstUser, token: ctxToken } = savedUsers[0];
       try {
         logger.info("bridge", "🎉 向已连接用户发送欢迎消息", { userId: firstUser });
-        await sendToAgentWithReply(firstUser, "嗨，我现在在微信和你聊天，如果遇到跳跃的话题就不用思考上下文了，打个招呼吧", [], {
+        await sendToAgentWithReply(firstUser, "你好，我现在在微信和你聊天，有什么可以帮你的？", [], {
           token,
           baseUrl,
           contextToken: ctxToken,

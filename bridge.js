@@ -949,11 +949,10 @@ async function mainLoop({ token, baseUrl }) {
       const { userId: firstUser, token: ctxToken } = savedUsers[0];
       try {
         logger.info("bridge", "🎉 向已连接用户发送欢迎消息", { userId: firstUser });
-        await sendToAgentWithReply(firstUser, "你好", [], {
-          token,
-          baseUrl,
-          contextToken: ctxToken,
-        });
+        // 欢迎消息同步发送，避免流式阻塞主循环启动
+        const welcomeResult = await sendToAgent(firstUser, "你好");
+        const welcomeText = (new StreamingMarkdownFilter()).feed(welcomeResult.text).flush();
+        await sendMessage({ baseUrl, token, toUserId: firstUser, text: welcomeText, contextToken: ctxToken });
       } catch (err) {
         logger.warn("bridge", "欢迎消息发送失败（非关键）", { userId: firstUser, err: err.message });
       }

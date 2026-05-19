@@ -341,13 +341,19 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
   }
   logger.info("opencode", "prompt_async sent", { sid });
 
-  // 3. 读 SSE，等 session.idle
+  // 3. SSE reader, max 30s wait for idle then fallback to sync
   let fullText = "", done = false, sseBuf = "";
   const reader = sseRes.body.getReader(), decoder = new TextDecoder();
+  const sseDeadline = Date.now() + 30_000; // 30s
 
   try {
-    while (!done) {
-      const { value, done: d } = await reader.read();
+    while (!done && Date.now() < sseDeadline) {
+      // 10s per-read timeout
+      const v = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("sse read timeout")), 10_000)),
+      ]);
+      const { value, done: d } = v;
       if (d) break;
       sseBuf += decoder.decode(value, { stream: true });
       const events = sseBuf.split("\n\n"); sseBuf = events.pop();

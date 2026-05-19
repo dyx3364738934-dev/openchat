@@ -276,207 +276,136 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
   }
 }
 
+export async function checkHealth() {
+  try { const d = await detect(); return !!d; } catch { return false; }
+}
+
+export async function startOpenCodeServer() {
+  const d = await detect();
+  if (d) { console.log("OK desktop OpenCode (" + d.port + ")"); return true; }
+  return false;
+}
+
+export function stopOpenCodeServer() {}
+
 /**
  * 流式发送消息到 agent：
  * 1. prompt_async 异步发送（立即返回 204）
- * 2. 监听 /global/event SSE，等待 session.idle 事件
+ * 2. 监听 /global/event SSE，等待 session.idle
  * 3. AI 完成后 GET 完整回复
- * 4. 失败时自动回退到同步 POST /message
- *
- * @param {string} userId - 用户 ID
- * @param {string} text - 文字内容
- * @param {object} opts - { model?, agent? }
- * @param {Array} mediaParts - 媒体文件
- * @param {object} streamOpts - { onDelta?: (text: string) => void, onProgress?: (elapsed: number) => void }
+ * 4. 失败自动回退同步 POST /message
  */
 export async function sendToAgentStreaming(userId, text, opts = {}, mediaParts = [], streamOpts = {}) {
   const base = await baseUrl();
   const h = headers();
   const cfg = getConfig();
   const targetModel = opts.model || cfg.opencodeModel || "deepseek-v4-pro";
-  const targetAgent = opts.agent || cfg.opencodeAgent || "build";
 
   let sid;
-  try {
-    sid = await getOrCreateSession(userId, targetModel);
-  } catch (err) {
-    throw new Error(`创建 session 失败: ${err.message}`);
-  }
+  try { sid = await getOrCreateSession(userId, targetModel); }
+  catch (err) { throw new Error(`创建 session 失败: ${err.message}`); }
 
   const esid = encodeURIComponent(sid);
-  const parts = buildParts(text, mediaParts);
-  const systemPrompt = getSystemPrompt();
-  const body = {
-    parts,
-    ...(systemPrompt ? { system: systemPrompt } : {}),
-  };
+  const body = { parts: buildParts(text, mediaParts), ...(getSystemPrompt() ? { system: getSystemPrompt() } : {}) };
 
-  // 尝试流式：SSE + prompt_async
-  try {
-    return await streamingRequest(base, h, sid, esid, body, streamOpts);
-  } catch (streamErr) {
-    logger.info("opencode", "SSE 流式失败，回退同步模式", { err: streamErr.message });
-    // 回退到同步模式
-    return await syncRequest(base, h, sid, esid, body);
+  try { return await _streamingRequest(base, h, sid, esid, body, streamOpts); }
+  catch (streamErr) {
+    logger.info("opencode", "SSE 流式失败，回退同步", { err: streamErr.message });
+    return await _syncRequest(base, h, sid, esid, body);
   }
 }
 
-/**
- * 流式请求：prompt_async + SSE 监听
- */
-async function streamingRequest(base, h, sid, esid, body, streamOpts) {
-  const { onDelta, onProgress } = streamOpts;
-  logger.info("opencode", "streaming request start", { sid });
+async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
+  const { onDelta } = streamOpts;
+  logger.info("opencode", "streaming start", { sid });
 
-  // 1. 先连接 SSE，避免错过早期事件
-  let sseResponse;
+  // 1. 先连 SSE
+  let sseRes;
   try {
-    sseResponse = await fetch(base + "/global/event", {
+    sseRes = await fetch(base + "/global/event", {
       headers: { ...h, "Accept": "text/event-stream" },
-      signal: AbortSignal.timeout(600_000), // 10 分钟
+      signal: AbortSignal.timeout(600_000),
     });
-    if (!sseResponse.ok || !sseResponse.body) {
-      throw new Error(`SSE 连接失败: HTTP ${sseResponse.status}`);
-    }
-  } catch (err) {
-    throw new Error(`SSE 连接失败: ${err.message}`);
-  }
+    if (!sseRes.ok || !sseRes.body) throw new Error(`SSE connect HTTP ${sseRes.status}`);
+  } catch (err) { throw new Error(`SSE 连接失败: ${err.message}`); }
 
-  // 2. 异步发送消息
-  const promptRes = await fetch(base + "/session/" + esid + "/prompt_async", {
-    method: "POST", headers: h,
-    body: JSON.stringify(body),
+  // 2. 异步发消息
+  const pr = await fetch(base + "/session/" + esid + "/prompt_async", {
+    method: "POST", headers: h, body: JSON.stringify(body),
     signal: AbortSignal.timeout(10000),
   });
-  // prompt_async 成功返回 204，有些版本可能返回 200
-  if (promptRes.status !== 204 && promptRes.status !== 200) {
-    const errText = await promptRes.text().catch(() => "");
-    // SSE 连接不要了
-    try { await sseResponse.body.cancel(); } catch {}
-    throw new Error(`prompt_async 失败: HTTP ${promptRes.status} ${errText.slice(0, 200)}`);
+  if (pr.status !== 204 && pr.status !== 200) {
+    try { await sseRes.body.cancel(); } catch {}
+    const errT = await pr.text().catch(() => "");
+    throw new Error(`prompt_async HTTP ${pr.status} ${errT.slice(0, 200)}`);
   }
   logger.info("opencode", "prompt_async sent", { sid });
 
-  // 3. 读取 SSE 流，等待 session.idle
-  let fullText = "";
-  let lastProgressTime = Date.now();
-  let done = false;
-  const reader = sseResponse.body.getReader();
-  const decoder = new TextDecoder();
-  let sseBuffer = "";
+  // 3. 读 SSE，等 session.idle
+  let fullText = "", done = false, sseBuf = "";
+  const reader = sseRes.body.getReader(), decoder = new TextDecoder();
 
   try {
     while (!done) {
-      const { value, done: streamDone } = await reader.read();
-      if (streamDone) break;
-
-      sseBuffer += decoder.decode(value, { stream: true });
-
-      // SSE 格式：每条事件由 \n\n 分隔，每行 data: {...}
-      const events = sseBuffer.split("\n\n");
-      sseBuffer = events.pop(); // 保留最后不完整的块
-
-      for (const event of events) {
-        for (const line of event.split("\n")) {
+      const { value, done: d } = await reader.read();
+      if (d) break;
+      sseBuf += decoder.decode(value, { stream: true });
+      const events = sseBuf.split("\n\n"); sseBuf = events.pop();
+      for (const evt of events) {
+        for (const line of evt.split("\n")) {
           if (!line.startsWith("data:")) continue;
-          const jsonStr = line.slice(5).trim();
-          if (!jsonStr) continue;
-
           try {
-            const evt = JSON.parse(jsonStr);
-
-            // 增量文本：累加到 fullText
-            if (evt.type === "message.part.delta" && evt.properties?.sessionID === sid) {
-              const delta = evt.properties?.delta || "";
-              if (delta) {
-                fullText += delta;
-                if (onDelta) onDelta(delta);
-              }
+            const e = JSON.parse(line.slice(5).trim());
+            if (e.type === "message.part.delta" && e.properties?.sessionID === sid) {
+              const delta = e.properties?.delta || "";
+              if (delta) { fullText += delta; if (onDelta) onDelta(delta); }
             }
-
-            // session.idle = AI 完成
-            if (evt.type === "session.idle" && evt.properties?.sessionID === sid) {
-              logger.info("opencode", "SSE: session.idle received", { sid, textLen: fullText.length });
-              done = true;
-              break;
+            if (e.type === "session.idle" && e.properties?.sessionID === sid) {
+              logger.info("opencode", "SSE: session.idle", { sid, textLen: fullText.length });
+              done = true; break;
             }
-
-            // 进度回调（每秒最多调一次）
-            if (onProgress && Date.now() - lastProgressTime >= 1000) {
-              lastProgressTime = Date.now();
-              onProgress(Date.now());
-            }
-          } catch {
-            // 非有效 JSON，跳过
-          }
+          } catch {}
         }
         if (done) break;
       }
     }
-  } catch (err) {
-    logger.warn("opencode", "SSE 流读取异常，尝试拉取完整回复", { err: err.message });
-  } finally {
-    try { await reader.cancel(); } catch {}
-  }
+  } catch (err) { logger.warn("opencode", "SSE 读取异常", { err: err.message }); }
+  finally { try { await reader.cancel(); } catch {} }
 
-  // 4. AI 完成（或 SSE 异常），尝试拉取完整回复以确保不丢失内容
-  //    SSE delta 可能不包含 step-finish 等完整数据，GET message 更可靠
+  // 4. 拉完整回复（SSE delta 可能不全）
   try {
-    const msgRes = await fetch(base + "/session/" + esid + "/message?limit=1", {
-      headers: h,
-      signal: AbortSignal.timeout(10000),
+    const mr = await fetch(base + "/session/" + esid + "/message?limit=1", {
+      headers: h, signal: AbortSignal.timeout(10000),
     });
-    if (msgRes.ok) {
-      const messages = await msgRes.json();
-      // messages 是数组，取最后一条
-      const lastMsg = Array.isArray(messages) ? messages[messages.length - 1] : null;
-      if (lastMsg?.parts) {
-        const completeText = lastMsg.parts
-          .filter(p => p.type === "text")
-          .map(p => p.text)
-          .join("");
-        // 只在 GET 到的文本比 SSE 累加的更长时替换（更完整）
-        if (completeText.length > fullText.length) {
-          fullText = completeText;
-        }
+    if (mr.ok) {
+      const msgs = await mr.json();
+      const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
+      if (last?.parts) {
+        const ct = last.parts.filter(p => p.type === "text").map(p => p.text).join("");
+        if (ct.length > fullText.length) fullText = ct;
       }
     }
-  } catch (err) {
-    logger.debug("opencode", "GET message 失败，使用 SSE 累计文本", { err: err.message });
-  }
+  } catch (err) { logger.debug("opencode", "GET message 失败", { err: err.message }); }
 
-  if (!fullText) {
-    throw new Error("SSE 流结束但未收到回复");
-  }
-
-  logger.info("opencode", "streaming reply ok", { sid, len: fullText.length });
+  if (!fullText) throw new Error("SSE 流结束但未收到回复");
+  logger.info("opencode", "streaming ok", { sid, len: fullText.length });
   return { text: fullText, parts: [], info: null };
 }
 
-/**
- * 同步请求（原 sendToAgent 的核心逻辑，作为流式失败的回退）
- */
-async function syncRequest(base, h, sid, esid, body) {
+/** 同步请求（流式失败的回退） */
+async function _syncRequest(base, h, sid, esid, body) {
   const ctrl = new AbortController();
   const tm = setTimeout(() => ctrl.abort(), 600_000);
-
   try {
     const res = await fetch(base + "/session/" + esid + "/message", {
-      method: "POST", headers: h,
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
+      method: "POST", headers: h, body: JSON.stringify(body), signal: ctrl.signal,
     });
     clearTimeout(tm);
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
-    }
-
-    const result = await res.json();
-    const reply = (result.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
-    logger.info("opencode", "sync reply ok", { sid, len: reply.length });
-    return { text: reply, parts: result.parts || [], info: result.info || null };
+    if (!res.ok) { const eb = await res.text().catch(() => ""); throw new Error(`HTTP ${res.status}: ${eb.slice(0, 300)}`); }
+    const r = await res.json();
+    const reply = (r.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
+    logger.info("opencode", "sync ok", { sid, len: reply.length });
+    return { text: reply, parts: r.parts || [], info: r.info || null };
   } catch (err) {
     clearTimeout(tm);
     if (err.name === "AbortError") throw new Error("agent timeout (10min)");

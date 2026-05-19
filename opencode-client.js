@@ -227,7 +227,7 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
   };
 
   const ctrl = new AbortController();
-  const tm = setTimeout(() => ctrl.abort(), 300_000);
+  const tm = setTimeout(() => ctrl.abort(), 600_000); // 10 分钟超时
 
   try {
     const res = await fetch(base + "/session/" + esid + "/message", {
@@ -252,7 +252,7 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
         const r2 = await fetch(base + "/session/" + encodeURIComponent(sid) + "/message", {
           method: "POST", headers: h,
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(300_000),
+          signal: AbortSignal.timeout(600_000),
         });
         if (!r2.ok) {
           const retryBody = await r2.text().catch(() => "");
@@ -271,7 +271,7 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
     return { text: reply, parts: result.parts || [], info: result.info || null };
   } catch (err) {
     clearTimeout(tm);
-    if (err.name === "AbortError") throw new Error("agent timeout (5min)");
+    if (err.name === "AbortError") throw new Error("agent timeout (10min)");
     throw err;
   }
 }

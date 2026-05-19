@@ -720,7 +720,7 @@ function friendlyError(err, model) {
     return `模型服务暂时不可用 — 请稍后重试${modelHint}\n技术详情: ${msg.slice(0, 200)}`;
   }
   if (/agent timeout/i.test(msg)) {
-    return `模型响应超时（5分钟）— 可能是模型负载高或网络不稳${modelHint}\n建议用 /model 切换模型`;
+    return `模型响应超时（10分钟）— 可能是模型负载高或网络不稳${modelHint}\n建议用 /model 切换模型`;
   }
   if (/session create/i.test(msg)) {
     return `创建会话失败 — 可能是模型不可用或服务异常${modelHint}\n技术详情: ${msg.slice(0, 200)}`;
@@ -767,6 +767,19 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
 
   const startTime = Date.now();
 
+  // 进度提示：每 30 秒给用户发一条"正在思考中..."，避免用户以为卡死
+  let progressTimer = null;
+  let progressCount = 0;
+  const PROGRESS_INTERVAL_MS = 30_000; // 30 秒
+  const progressTick = () => {
+    progressCount++;
+    const dots = ".".repeat(Math.min(progressCount, 5));
+    sendMessage({ baseUrl, token, toUserId: userId, text: `⏳ 正在思考中${dots}`, contextToken })
+      .catch(() => {}); // 发送失败无所谓
+    progressTimer = setTimeout(progressTick, PROGRESS_INTERVAL_MS);
+  };
+  progressTimer = setTimeout(progressTick, PROGRESS_INTERVAL_MS);
+
   try {
     // 调用 OpenCode agent
     const cfg = getConfig();
@@ -776,6 +789,9 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
     logger.debug("bridge", `🤖 调用 agent`, { from: userId, hasMedia: mediaParts.length > 0, model: currentModel });
     const result = await sendToAgent(userId, text, { ...prefs, ...agentOpts }, mediaParts);
     const aiMs = Date.now() - startTime;
+
+    // 停止进度提示
+    if (progressTimer) clearTimeout(progressTimer);
 
     // Markdown 过滤
     const filter = new StreamingMarkdownFilter();
@@ -803,6 +819,8 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
 
     console.log(`✅ 回复已发送 → ${userId} (${aiMs}ms, ${chunks.length}段${mediaParts.length ? ", 📷" : ""})`);
   } catch (err) {
+    // 停止进度提示
+    if (progressTimer) clearTimeout(progressTimer);
     logger.error("bridge", "处理消息失败", err);
 
     // 如果带图片发送失败，尝试降级为纯文字
@@ -876,6 +894,8 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
       // 连错误提示都发不出去就算了
     }
   } finally {
+    // 确保进度提示也被清除
+    if (progressTimer) clearTimeout(progressTimer);
     if (typingTicket) {
       await sendTyping({
         baseUrl,

@@ -951,7 +951,8 @@ async function mainLoop({ token, baseUrl }) {
         logger.info("bridge", "🎉 向已连接用户发送欢迎消息", { userId: firstUser });
         // 欢迎消息同步发送，避免流式阻塞主循环启动
         const welcomeResult = await sendToAgent(firstUser, "你好");
-        const welcomeText = (new StreamingMarkdownFilter()).feed(welcomeResult.text).flush();
+        const wf = new StreamingMarkdownFilter();
+        const welcomeText = wf.feed(welcomeResult.text) + wf.flush();
         await sendMessage({ baseUrl, token, toUserId: firstUser, text: welcomeText, contextToken: ctxToken });
       } catch (err) {
         logger.warn("bridge", "欢迎消息发送失败（非关键）", { userId: firstUser, err: err.message });

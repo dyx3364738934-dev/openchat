@@ -61,11 +61,11 @@ export const TypingStatus = {
 };
 
 /** iLink App 常量（从 openclaw-weixin 的 package.json 提取） */
-const ILINK_APP_ID = "bot";
-const CHANNEL_VERSION = "2.4.1";
+export const ILINK_APP_ID = "bot";
+export const CHANNEL_VERSION = "2.4.1";
 
 /** 将版本号 "2.4.1" 编码为 uint32: 0x00020401 */
-function buildClientVersion(version) {
+export function buildClientVersion(version) {
   const parts = version.split(".").map((p) => parseInt(p, 10));
   const major = parts[0] ?? 0;
   const minor = parts[1] ?? 0;

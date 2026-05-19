@@ -74,15 +74,15 @@ async function displayQRCode(url) {
   }
 }
 
+import { buildClientVersion, CHANNEL_VERSION } from "./wechat-api.js";
+
 /**
  * 构建 GET 请求的通用头
  */
 function buildGetHeaders() {
   return {
     "iLink-App-Id": "bot",
-    "iLink-App-ClientVersion": String(
-      ((2 & 0xff) << 16) | ((4 & 0xff) << 8) | (1 & 0xff)
-    ),
+    "iLink-App-ClientVersion": String(buildClientVersion(CHANNEL_VERSION)),
   };
 }
 

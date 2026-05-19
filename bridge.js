@@ -43,6 +43,8 @@ import {
   stopOpenCodeServer,
   sendToAgent,
   resetSession,
+  getOpenCodePort,
+  getOpenCodeAuth,
 } from "./opencode-client.js";
 import { StreamingMarkdownFilter } from "./markdown-filter.js";
 import { extractImageFromItems } from "./cdn.js";
@@ -237,10 +239,8 @@ async function handleSlashCommand(raw, userId, { token, baseUrl, contextToken })
       if (args[0]?.toLowerCase() === "refresh") {
         cmdContext.delete(userId);
         try {
-          const auth = "Basic " + Buffer.from("opencode:" + (process.env[OC_PREFIX + "SERVER_PASSWORD"] || "")).toString("base64");
-          const port = await detectPortForModels();
-          if (!port) return "无法检测 OpenCode 端口，请确保桌面应用正在运行";
-          await probeFreeModels(port, auth);
+          if (!(await getOpenCodePort())) return "无法检测 OpenCode 端口，请确保桌面应用正在运行";
+          await probeFreeModels();
           const models = await fetchAvailableModels();
           const freeCount = models.filter(m => m.free).length;
           return `刷新完成 ✅\n当前可用: ${models.length} 个模型 (其中 ${freeCount} 个免费)\n发送 /model 查看列表`;
@@ -252,13 +252,7 @@ async function handleSlashCommand(raw, userId, { token, baseUrl, contextToken })
       if (!args[0]) {
         const models = await fetchAvailableModels();
         if (models.length === 0) return "无法获取可用模型列表";
-        const providerLabels = {
-          opencode: "opencode (Zen)",
-          deepseek: "deepseek",
-          google: "google",
-          "opencode-go": "opencode (Go)",
-          openrouter: "openrouter",
-        };
+        const providerLabels = getConfig().providerLabels;
         const groups = new Map();
         for (const m of models) {
           const provider = m.provider || "other";
@@ -376,9 +370,13 @@ function markBrokenModel(modelId) {
  * 这样可以发现之前坏掉但现已恢复的模型，从 broken 列表中移除
  * 只测创建 session（不发消息），401/403 不标记为坏模型
  */
-async function probeFreeModels(port, auth) {
+async function probeFreeModels() {
+  const port = await getOpenCodePort();
+  const auth = getOpenCodeAuth();
+  if (!port) return;
+
   // 直接从 API 获取原始模型列表，不过滤 broken
-  const rawModels = await fetchRawModels(port, auth);
+  const rawModels = await fetchRawModels();
   const freeModels = rawModels.filter(m => m.free);
   if (freeModels.length === 0) return;
 
@@ -394,7 +392,7 @@ async function probeFreeModels(port, auth) {
       // 只测创建 session 能否成功（不发消息，不消耗 token）
       const s = await fetch("http://127.0.0.1:" + port + "/session", {
         method: "POST",
-        headers: { Authorization: "Basic " + auth, "Content-Type": "application/json" },
+        headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify({ agent: "build", model: { id: modelId, providerID } }),
         signal: AbortSignal.timeout(5000),
       });
@@ -413,7 +411,7 @@ async function probeFreeModels(port, auth) {
           const session = await s.json();
           await fetch("http://127.0.0.1:" + port + "/session/" + encodeURIComponent(session.id), {
             method: "DELETE",
-            headers: { Authorization: "Basic " + auth },
+            headers: { Authorization: auth },
             signal: AbortSignal.timeout(3000),
           }).catch(() => {});
         } catch {}
@@ -441,8 +439,11 @@ async function probeFreeModels(port, auth) {
   console.log(`🔍 免费模型验证完成: ✅${okCount} ♻️${recoveredCount} 🚫${failCount} ⏭️${authSkipCount} / 共${total}个, 坏模型缓存: ${broken.size}个`);
 }
 
-/** 从 API 获取原始模型列表（不过滤 broken、不排除 embedding/tts） */
-async function fetchRawModels(port, auth) {
+/** 从 OpenCode API 获取原始模型列表（不过滤 broken、不排除 embedding/tts） */
+async function fetchRawModels() {
+  const auth = getOpenCodeAuth();
+  const port = await getOpenCodePort();
+  if (!port || !auth) return [];
   try {
     const r = await fetch("http://127.0.0.1:" + port + "/api/model", {
       headers: { Authorization: auth, "Content-Type": "application/json" },
@@ -455,7 +456,8 @@ async function fetchRawModels(port, auth) {
       const id = m.providerID + "/" + m.id;
       const isFree = (Array.isArray(m.cost) && m.cost.some(c => c.input === 0 && c.output === 0))
         || m.id.toLowerCase().includes(":free");
-      return { id, name: m.name || m.id, provider: m.providerID, free: isFree };
+      const hasImage = Array.isArray(m.capabilities?.input) && m.capabilities.input.includes("image");
+      return { id, name: m.name || m.id, provider: m.providerID, free: isFree, hasImage };
     });
   } catch {
     return [];
@@ -464,58 +466,27 @@ async function fetchRawModels(port, auth) {
 
 /** 从 OpenCode API 获取可用模型，动态拉取 + 持久化坏模型缓存 */
 async function fetchAvailableModels() {
-  const seen = new Map(); // id -> { id, name, provider, free?, hasImage? }
-
-  // 从 OpenCode API 获取完整的模型列表
-  try {
-    const auth = "Basic " + Buffer.from("opencode:" + (process.env[OC_PREFIX + "SERVER_PASSWORD"] || "")).toString("base64");
-    const port = await detectPortForModels();
-    if (port) {
-      const r = await fetch("http://127.0.0.1:" + port + "/api/model", {
-        headers: { Authorization: auth, "Content-Type": "application/json" }, signal: AbortSignal.timeout(5000),
-      });
-      if (r.ok) {
-        const models = await r.json();
-        if (Array.isArray(models)) {
-          for (const m of models) {
-            const id = m.providerID + "/" + m.id;
-            if (seen.has(id)) continue;
-            const isFree = (Array.isArray(m.cost) && m.cost.some(c => c.input === 0 && c.output === 0))
-              || m.id.toLowerCase().includes(":free");
-            const hasImage = Array.isArray(m.capabilities?.input) && m.capabilities.input.includes("image");
-            seen.set(id, { id, name: m.name || m.id, provider: m.providerID, free: isFree, hasImage });
-          }
-        }
-      }
-    }
-  } catch (err) {
-    logger.debug("bridge", "获取 API 模型列表失败", err.message);
+  // 复用 fetchRawModels，避免重复 API 请求
+  const rawModels = await fetchRawModels();
+  const seen = new Map();
+  for (const m of rawModels) {
+    if (!seen.has(m.id)) seen.set(m.id, m);
   }
 
-  // 确保默认模型在列表中
   const cfg = getConfig();
+
+  // 确保默认模型在列表中
   const defaultModel = cfg.opencodeModel || "deepseek-v4-pro";
+
+  // 付费模型白名单（从配置读取，可自定义）
+  const paidAllowlist = cfg.paidAllowlist;
   const defaultId = defaultModel.includes("/") ? defaultModel : "deepseek/" + defaultModel;
   if (!seen.has(defaultId)) {
     seen.set(defaultId, { id: defaultId, name: defaultModel, provider: defaultModel.includes("/") ? defaultModel.split("/")[0] : "deepseek", free: false });
   }
-  if (cfg.opencodeVisionModel && !seen.has(cfg.opencodeVisionModel)) {
-    seen.set(cfg.opencodeVisionModel, { id: cfg.opencodeVisionModel, name: cfg.opencodeVisionModel, provider: cfg.opencodeVisionModel.split("/")[0], free: false, hasImage: true });
-  }
 
-  // 筛选：免费模型全部保留 + 付费模型只保留主力
-  const paidAllowlist = new Set([
-    "deepseek/deepseek-v4-pro",
-    "deepseek/deepseek-v4-flash",
-    "deepseek/deepseek-chat",
-    "deepseek/deepseek-reasoner",
-    "google/gemini-2.5-flash",
-    "google/gemini-2.5-flash-lite",
-    "google/gemini-2.5-pro",
-    "google/gemini-3-flash-preview",
-    "google/gemini-3.1-flash-lite",
-    "google/gemini-3.1-flash-image-preview",
-  ]);
+  // 筛选：免费模型全部保留 + 付费模型只保留主力（从配置读取）
+  // paidAllowlist 在函数开头已从 cfg 获取
 
   // 从持久化文件加载已知坏模型
   const brokenModels = loadBrokenModels();
@@ -541,21 +512,6 @@ async function fetchAvailableModels() {
     return a.id.localeCompare(b.id);
   });
   return result;
-}
-
-/** 获取端口用于查询 models */
-async function detectPortForModels() {
-  try {
-    const { execSync } = await import("node:child_process");
-    const ns = execSync("netstat -ano", { encoding: "utf-8", timeout: 5000, windowsHide: true });
-    const pm = new Map();
-    for (const m of ns.matchAll(/127\.0\.0\.1:(\d+)\s+.*LISTENING\s+(\d+)/g)) pm.set(parseInt(m[2]), parseInt(m[1]));
-    const tl = execSync('tasklist /FI "IMAGENAME eq OpenCode.exe" /FO CSV /NH', { encoding: "utf-8", timeout: 5000, windowsHide: true });
-    const ocs = new Set();
-    for (const m of tl.matchAll(/"OpenCode\.exe","(\d+)"/g)) ocs.add(parseInt(m[1]));
-    for (const [pid, port] of pm) if (ocs.has(pid)) return port;
-  } catch {}
-  return null;
 }
 
 // ======== 待发送媒体暂存 ========
@@ -597,7 +553,38 @@ async function processOneMessage(msg, { token, baseUrl }) {
     return;
   }
 
-  // 非 / 命令的普通消息：清除残留的交互上下文（如 /model 列表选择状态）
+  // 非 / 命令的普通消息：检查是否有等待中的交互上下文（如 /model 选择）
+  const pendingCmd = cmdContext.get(fromUserId);
+  if (pendingCmd && pendingCmd.cmd === "model") {
+    // 用户在 /model 交互模式中，把这条消息当作模型选择处理
+    console.log(`📩 收到模型选择: ${textBody.slice(0, 80)}`);
+    const ctx = pendingCmd;
+    const choice = textBody.trim();
+    // 严格数字判断
+    if (choice !== "" && !isNaN(Number(choice))) {
+      const idx = parseInt(choice) - 1;
+      if (idx >= 0 && idx < ctx.data.length) {
+        const chosen = ctx.data[idx];
+        userPrefs.set(fromUserId, { ...userPrefs.get(fromUserId), model: chosen.id });
+        cmdContext.delete(fromUserId);
+        await sendMessage({ baseUrl, token, toUserId: fromUserId, text: `模型已切换为 ${chosen.id}\n(${chosen.name || chosen.id})`, contextToken });
+        return;
+      }
+      await sendMessage({ baseUrl, token, toUserId: fromUserId, text: `序号超出范围 (1-${ctx.data.length})，请重新输入`, contextToken });
+      return;
+    }
+    // 非数字 → 名称匹配
+    const match = ctx.data.find(m => m.id === choice || m.name === choice || m.id.endsWith("/" + choice));
+    if (match) {
+      userPrefs.set(fromUserId, { ...userPrefs.get(fromUserId), model: match.id });
+      cmdContext.delete(fromUserId);
+      await sendMessage({ baseUrl, token, toUserId: fromUserId, text: `模型已切换为 ${match.id}`, contextToken });
+      return;
+    }
+    await sendMessage({ baseUrl, token, toUserId: fromUserId, text: `未找到 "${choice}"，请重试 (/model 重新列表，或输入其他命令如 /help)`, contextToken });
+    return;
+  }
+  // 清除残留的交互上下文
   if (cmdContext.has(fromUserId)) {
     cmdContext.delete(fromUserId);
   }
@@ -781,19 +768,12 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
   const startTime = Date.now();
 
   try {
-    // 调用 OpenCode agent（支持文字 + 媒体）
+    // 调用 OpenCode agent
     const cfg = getConfig();
     const prefs = userPrefs.get(userId) || {};
     const currentModel = prefs.model || cfg.opencodeModel || "deepseek-v4-pro";
-    // 有图片时，如果配置了视觉模型，自动切换
-    const visionModel = cfg.opencodeVisionModel;
-    const shouldSwitch = mediaParts.length > 0 && visionModel && visionModel !== currentModel;
-    if (shouldSwitch) {
-      logger.info("bridge", "📷 有图片，自动切换视觉模型", { from: currentModel, to: visionModel });
-    }
-    const activeModel = shouldSwitch ? visionModel : currentModel;
-    const agentOpts = shouldSwitch ? { model: visionModel } : {};
-    logger.debug("bridge", `🤖 调用 agent`, { from: userId, hasMedia: mediaParts.length > 0, model: activeModel, switched: shouldSwitch });
+    const agentOpts = {};
+    logger.debug("bridge", `🤖 调用 agent`, { from: userId, hasMedia: mediaParts.length > 0, model: currentModel });
     const result = await sendToAgent(userId, text, { ...prefs, ...agentOpts }, mediaParts);
     const aiMs = Date.now() - startTime;
 
@@ -855,15 +835,36 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
       }
     }
 
-    // 非图片的 500 错误：标记模型为坏模型，下次不再显示
-    if (/HTTP 5\d{2}/i.test(err.message) && mediaParts.length === 0 && activeModel) {
-      markBrokenModel(activeModel);
+    // 非图片的 500 错误：标记模型为坏模型，自动回退到默认模型重试
+    if (/HTTP 5\d{2}/i.test(err.message) && mediaParts.length === 0 && currentModel) {
+      markBrokenModel(currentModel);
+
+      // 如果当前不是默认模型，自动回退重试一次
+      const defaultModel = getConfig().opencodeModel || "deepseek-v4-pro";
+      if (currentModel !== defaultModel) {
+        try {
+          logger.info("bridge", "模型 500 错误，自动回退到默认模型重试", { from: userId, failedModel: currentModel, fallbackModel: defaultModel });
+          const retryResult = await sendToAgent(userId, text, { model: defaultModel });
+          const filter = new StreamingMarkdownFilter();
+          const filtered = filter.feed(retryResult.text) + filter.flush();
+          const chunks = splitLongText(filtered);
+          for (let i = 0; i < chunks.length; i++) {
+            await sendMessage({ baseUrl, token, toUserId: userId, text: chunks[i], contextToken });
+            if (i < chunks.length - 1) await sleep(500);
+          }
+          await sendMessage({ baseUrl, token, toUserId: userId, text: `💡 模型 ${currentModel} 不可用，已自动切换到 ${defaultModel}`, contextToken });
+          console.log(`✅ 回复已发送（500 回退） → ${userId}`);
+          return;
+        } catch (retryErr) {
+          logger.error("bridge", "回退到默认模型也失败", retryErr);
+        }
+      }
     }
 
     console.error(`❌ 回复失败 → ${userId}: ${err.message}`);
 
     try {
-      const userMsg = friendlyError(err, activeModel);
+      const userMsg = friendlyError(err, currentModel);
       await sendMessage({
         baseUrl,
         token,
@@ -909,17 +910,12 @@ async function mainLoop({ token, baseUrl }) {
   const cfg = getConfig();
   console.log("\n🟢 桥接服务已启动，等待微信消息...\n");
   console.log(`   模型: ${cfg.opencodeModel || "deepseek-v4-pro(默认)"}`);
-  if (cfg.opencodeVisionModel) console.log(`   视觉模型: ${cfg.opencodeVisionModel}`);
   const sp = getSystemPrompt();
   if (sp) console.log(`   系统提示词: ${sp.length} 字符`);
 
   // 启动时快速验证免费模型可用性（直接从 API 获取原始列表，包含 broken 模型以便发现恢复的）
   try {
-    const auth = "Basic " + Buffer.from("opencode:" + (process.env[OC_PREFIX + "SERVER_PASSWORD"] || "")).toString("base64");
-    const port = await detectPortForModels();
-    if (port) {
-      await probeFreeModels(port, auth);
-    }
+    await probeFreeModels();
   } catch (err) {
     logger.warn("bridge", "免费模型验证失败（非关键）", err.message);
   }
@@ -929,12 +925,11 @@ async function mainLoop({ token, baseUrl }) {
     pollTimeoutMs: longPollTimeoutMs,
     bufLen: getUpdatesBuf.length,
     model: cfg.opencodeModel || "deepseek-v4-pro",
-    visionModel: cfg.opencodeVisionModel || "(未配置)",
     systemPrompt: sp ? `${sp.length} chars` : "(未配置)",
   });
 
-  // 启动时主动打招呼：用系统提示词触发 AI 发送欢迎消息
-  if (sp) {
+  // 启动时主动打招呼：用系统提示词触发 AI 发送欢迎消息（可通过 welcomeEnabled 配置关闭）
+  if (sp && cfg.welcomeEnabled) {
     const savedUsers = getAllContextTokens(ACCOUNT_ID);
     if (savedUsers.length > 0) {
       // 只给最近一个用户发，避免广播骚扰

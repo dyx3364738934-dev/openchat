@@ -21,7 +21,6 @@ const ENV = {
   OC_AUTO_START: OC_PREFIX + "AUTO_START",
   OC_AGENT: OC_PREFIX + "AGENT",
   OC_MODEL: OC_PREFIX + "MODEL",
-  OC_VISION_MODEL: OC_PREFIX + "VISION_MODEL",
   OC_SYSTEM_PROMPT: OC_PREFIX + "SYSTEM_PROMPT",
   LOG_DIR: "LOG_DIR",
   STATE_DIR: "STATE_DIR",
@@ -66,12 +65,9 @@ function loadConfig() {
     })(),
     opencodeAgent: env(ENV.OC_AGENT) || fc.opencodeAgent || null,
     opencodeModel: env(ENV.OC_MODEL) || fc.opencodeModel || null,
-    // 图片消息使用的视觉模型（支持 vision 的模型）
-    // 推荐值: "google/gemini-2.5-flash" (稳定支持图片识别，需 Google API key)
-    // 设置方法: env OPENCODE_VISION_MODEL=google/gemini-2.5-flash 或 config.json 中 opencodeVisionModel
-    // 不设置则用默认模型发图（deepseek 等不支持图片识别）
-    opencodeVisionModel: env(ENV.OC_VISION_MODEL) || fc.opencodeVisionModel || null,
-
+    // 图片消息由当前模型处理（不再自动切换视觉模型）
+    // 如需使用视觉模型，请通过 /model 命令手动切换
+    
     // 系统提示词：注入到每条消息中，定义 AI 的人格和行为准则
     // 支持三种写法:
     //   1. 环境变量: OPENCODE_SYSTEM_PROMPT="你是微信助手..."
@@ -90,6 +86,33 @@ function loadConfig() {
     allowFrom: normalizeAllowFrom(env(ENV.ALLOW_FROM) || fc.allowFrom || []),
     botAgent: env(ENV.BOT_AGENT) || fc.botAgent || "WeChat-OpenCode-Bridge/1.0",
     longPollTimeoutMs: parseInt(env(ENV.LONG_POLL_TIMEOUT_MS)) || fc.longPollTimeoutMs || 35000,
+    // 启动时是否发送欢迎消息（默认 true，设为 false 关闭）
+    welcomeEnabled: (() => {
+      const ev = env("WELCOME_ENABLED");
+      if (ev !== undefined && ev !== "") return ev.toLowerCase() !== "false" && ev !== "0";
+      return fc.welcomeEnabled ?? true;
+    })(),
+    // 付费模型白名单（不在白名单中的付费模型不显示）
+    paidAllowlist: new Set(fc.paidAllowlist || [
+      "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4-flash",
+      "deepseek/deepseek-chat",
+      "deepseek/deepseek-reasoner",
+      "google/gemini-2.5-flash",
+      "google/gemini-2.5-flash-lite",
+      "google/gemini-2.5-pro",
+      "google/gemini-3-flash-preview",
+      "google/gemini-3.1-flash-lite",
+      "google/gemini-3.1-flash-image-preview",
+    ]),
+    // 供应商显示名称映射
+    providerLabels: fc.providerLabels || {
+      opencode: "opencode (Zen)",
+      deepseek: "deepseek",
+      google: "google",
+      "opencode-go": "opencode (Go)",
+      openrouter: "openrouter",
+    },
   };
 }
 

@@ -85,9 +85,15 @@ function sessionKey(userId, model) {
 }
 
 async function getOrCreateSession(userId, model) {
-  // 已有 session 直接返回
   const key = sessionKey(userId, model);
-  if (sessions.has(key)) return sessions.get(key);
+
+  // 已有 session：先取出值，删旧 key，再重新 set（Map 会把 key 移到末尾，实现真 LRU）
+  if (sessions.has(key)) {
+    const sid = sessions.get(key);
+    sessions.delete(key);
+    sessions.set(key, sid);
+    return sid;
+  }
 
   // 如果另一个并发请求正在创建 session，等待它完成后取结果
   if (locks.has(key)) {
@@ -146,6 +152,21 @@ export async function resetSession(userId, model) {
       sessions.delete(key);
     }
   }
+}
+
+/** 获取 OpenCode 桌面版端口号（复用 detect 的缓存结果） */
+export async function getOpenCodePort() {
+  const d = await detect();
+  return d ? d.port : null;
+}
+
+/** 获取 OpenCode 桌面版认证 header（复用 detect 的缓存结果） */
+export function getOpenCodeAuth() {
+  if (_auth) return "Basic " + _auth;
+  const password = process.env[OC_PREFIX + "SERVER_PASSWORD"];
+  if (!password) return null;
+  const username = process.env[OC_PREFIX + "SERVER_USERNAME"] || "opencode";
+  return "Basic " + Buffer.from(username + ":" + password).toString("base64");
 }
 
 /**

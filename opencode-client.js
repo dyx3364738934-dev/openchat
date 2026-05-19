@@ -345,14 +345,14 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
   logger.info("opencode", "prompt_async sent", { sid });
 
   // 3. SSE reader, max 10s wait for idle then fallback to sync
+  // SSE 格式: event: <type>\ndata: <json>\n\n
   let fullText = "", done = false, sseBuf = "";
   const reader = sseRes.body.getReader(), decoder = new TextDecoder();
-  const sseDeadline = Date.now() + 10_000; // 10s
+  const sseDeadline = Date.now() + 10_000;
   let eventCount = 0;
 
   try {
     while (!done && Date.now() < sseDeadline) {
-      // 10s per-read timeout
       const v = await Promise.race([
         reader.read(),
         new Promise((_, reject) => setTimeout(() => reject(new Error("sse read timeout")), 10_000)),
@@ -360,30 +360,43 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
       const { value, done: d } = v;
       if (d) break;
       sseBuf += decoder.decode(value, { stream: true });
-      const events = sseBuf.split("\n\n"); sseBuf = events.pop();
-      for (const evt of events) {
-        for (const line of evt.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          try {
-            const e = JSON.parse(line.slice(5).trim());
-            eventCount++;
-            // 前 5 个事件打日志，方便排查 SSE 问题
-            if (eventCount <= 5) logger.info("opencode", `SSE event #${eventCount}`, { type: e.type, sessionID: e.properties?.sessionID, hasDelta: !!e.properties?.delta });
-            if (e.type === "message.part.delta" && e.properties?.sessionID === sid) {
-              const delta = e.properties?.delta || "";
-              if (delta) { fullText += delta; if (onDelta) onDelta(delta); }
-            }
-            if (e.type === "session.idle" && e.properties?.sessionID === sid) {
-              logger.info("opencode", "SSE: session.idle", { sid, textLen: fullText.length });
-              done = true; break;
-            }
-            // 诊断：任何 session.idle 事件都记录（排查字段名不匹配）
-            if (e.type === "session.idle") {
-              logger.debug("opencode", "SSE: idle event seen", { mine: sid, theirs: e.properties?.sessionID, keys: Object.keys(e.properties || {}) });
-            }
-          } catch {}
+
+      // SSE 事件由 \n\n 分隔
+      const blocks = sseBuf.split("\n\n"); sseBuf = blocks.pop();
+      for (const block of blocks) {
+        let eventType = "";
+        let dataJson = null;
+
+        // 解析 event: 和 data: 行
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) eventType = line.slice(6).trim();
+          if (line.startsWith("data:")) {
+            try { dataJson = JSON.parse(line.slice(5).trim()); } catch {}
+          }
         }
-        if (done) break;
+        if (!dataJson) continue;
+
+        eventCount++;
+        // 前 5 个事件打日志诊断
+        if (eventCount <= 5) logger.info("opencode", `SSE event #${eventCount}`, { eventType, keys: Object.keys(dataJson).slice(0, 5).join(","), sessionID: dataJson.sessionID });
+
+        // 匹配我们 session 的事件（sessionID 在 dataJson 根级别）
+        const isOurs = dataJson.sessionID === sid;
+
+        if (eventType === "message.part.delta" && isOurs) {
+          const delta = dataJson.delta || "";
+          if (delta) { fullText += delta; if (onDelta) onDelta(delta); }
+        }
+
+        if (eventType === "session.idle" && isOurs) {
+          logger.info("opencode", "SSE: session.idle received", { sid, textLen: fullText.length });
+          done = true; break;
+        }
+
+        // 诊断：任何 session.idle 都记录（排查字段名不匹配）
+        if (eventType === "session.idle") {
+          logger.debug("opencode", "SSE: idle event seen", { mySession: sid, eventSession: dataJson.sessionID });
+        }
       }
     }
   } catch (err) { logger.warn("opencode", "SSE 读取异常", { err: err.message }); }

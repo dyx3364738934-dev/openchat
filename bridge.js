@@ -130,6 +130,57 @@ async function ensureLogin(args) {
 // ======== Message Split ========
 
 /**
+ * 智能找断点：在大段文本中找到自然的分割位置
+ * 优先级：段落(\\n\\n) > 句号(。) > 换行(\\n) > 逗号(，)
+ * 保护代码块(```)和表格不被截断
+ * @returns {number} 断点位置，-1 表示不够长不分
+ */
+function findSmartSplit(text, minLen = 200) {
+  if (text.length < minLen) return -1;
+
+  // 检查代码块完整性：奇数个 ``` 表示正在代码块内
+  const fenceCount = (text.match(/```/g) || []).length;
+  if (fenceCount % 2 !== 0) {
+    // 代码块未闭合，等闭合后再切
+    const closeIdx = text.indexOf("```", minLen);
+    if (closeIdx !== -1) return closeIdx + 3;
+    return -1; // 还没闭合，不分
+  }
+
+  // 检查表格行（以 | 开头的行），不在表格中间切
+  const lastNewline = text.lastIndexOf("\n", minLen);
+  const afterNewline = text.slice(lastNewline + 1, lastNewline + 20);
+  if (afterNewline.trimStart().startsWith("|")) {
+    // 在表格行内，退到上一个 \n\n
+    const prevPara = text.lastIndexOf("\n\n", minLen - 1);
+    if (prevPara > minLen / 2) return prevPara + 2;
+    return -1;
+  }
+
+  // 1. 段落分隔（最优）
+  const paraBreak = text.indexOf("\n\n", minLen);
+  if (paraBreak !== -1 && paraBreak < minLen + 1000) return paraBreak + 2;
+
+  // 2. 句子结束
+  const sentenceRe = /[。！？\n](?![」』）\)\】\"\'\/\/])/;
+  const sentenceMatch = text.slice(minLen).match(sentenceRe);
+  if (sentenceMatch) return minLen + sentenceMatch.index + 1;
+
+  // 3. 逗号/顿号
+  const commaMatch = text.slice(minLen).match(/[，、；]/);
+  if (commaMatch) return minLen + commaMatch.index + 1;
+
+  // 4. 空格（英文）
+  const spaceIdx = text.indexOf(" ", minLen);
+  if (spaceIdx !== -1 && spaceIdx < minLen + 300) return spaceIdx + 1;
+
+  // 5. 文本太长了，硬切
+  if (text.length > 800) return minLen;
+
+  return -1;
+}
+
+/**
  * 将长文本按微信消息限制分割
  * 尽量在换行处分割，避免截断代码块（保持 ``` 配对）
  */
@@ -779,43 +830,48 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
     logger.debug("bridge", `🤖 调用 agent (streaming)`, { from: userId, hasMedia: mediaParts.length > 0, model: currentModel });
 
     let result;
+    let lastSentLen = 0; // 已发送到微信的文本长度
+
     try {
-      // 优先用流式：prompt_async + SSE，更快拿到回复
+      // 轮询模式：每 2 秒拉一次回复，智能分块发送
       result = await sendToAgentStreaming(userId, text, { ...prefs, ...agentOpts }, mediaParts, {
-        onDelta: () => {}, // 暂不逐字推送到微信
+        onDelta: (fullText) => {
+          // 计算出还没发送的新文本
+          const newText = fullText.slice(lastSentLen);
+          if (!newText) return;
+
+          // 找自然断点
+          const splitAt = findSmartSplit(newText);
+          if (splitAt <= 0) return; // 还不够多，不切
+
+          const chunk = newText.slice(0, splitAt);
+          const mf = new StreamingMarkdownFilter();
+          const filtered = mf.feed(chunk) + mf.flush();
+          lastSentLen += splitAt;
+
+          // 异步发送，不阻塞轮询
+          sendMessage({ baseUrl, token, toUserId: userId, text: filtered, contextToken })
+            .catch(() => {});
+        },
       });
     } catch (streamErr) {
-      // 流式失败，回退到同步模式（sendToAgent 内部会再试一次）
       logger.info("bridge", "流式发送失败，回退同步", { err: streamErr.message });
       result = await sendToAgent(userId, text, { ...prefs, ...agentOpts }, mediaParts);
     }
     const aiMs = Date.now() - startTime;
 
-    // Markdown 过滤
-    const filter = new StreamingMarkdownFilter();
-    const filtered = filter.feed(result.text) + filter.flush();
-
-    // 分割长消息
-    const chunks = splitLongText(filtered);
-    logger.debug("bridge", `发送回复`, { chunks: chunks.length });
-    const preview = chunks[0].slice(0, 60).replace(/\n/g, "\\n");
-    console.log(`💬 回复: ${preview}${chunks[0].length > 60 ? "..." : ""}`);
-
-    // 逐段发送
-    for (let i = 0; i < chunks.length; i++) {
-      await sendMessage({
-        baseUrl,
-        token,
-        toUserId: userId,
-        text: chunks[i],
-        contextToken,
-      });
-      if (i < chunks.length - 1) {
-        await sleep(500);
+    // 发送剩余未发送的文本（最后一块）
+    const remaining = result.text.slice(lastSentLen);
+    if (remaining.trim()) {
+      const filter = new StreamingMarkdownFilter();
+      const filtered = filter.feed(remaining) + filter.flush();
+      const chunks = splitLongText(filtered);
+      for (let i = 0; i < chunks.length; i++) {
+        await sendMessage({ baseUrl, token, toUserId: userId, text: chunks[i], contextToken });
+        if (i < chunks.length - 1) await sleep(500);
       }
     }
-
-    console.log(`✅ 回复已发送 → ${userId} (${aiMs}ms, ${chunks.length}段${mediaParts.length ? ", 📷" : ""})`);
+    console.log(`✅ 回复已发送 → ${userId} (${aiMs}ms${lastSentLen > 0 ? ", 分" + Math.ceil(result.text.length / lastSentLen) + "段" : ""})`);
   } catch (err) {
     logger.error("bridge", "处理消息失败", err);
 

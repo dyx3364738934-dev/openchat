@@ -333,9 +333,10 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
   }
   logger.info("opencode", "prompt_async sent, polling for reply", { sid });
 
-  // 2. 轮询 GET /message，每 2 秒检查一次，最多 2 分钟
+  // 2. 轮询 GET /message，每 2 秒一次，最多 2 分钟
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const POLL_MAX = 60; // 60 x 2s = 2 分钟
+  const POLL_MAX = 60;
+  let lastText = "", stableCount = 0;
 
   for (let i = 0; i < POLL_MAX; i++) {
     await sleep(2000);
@@ -343,17 +344,34 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
       const mr = await fetch(base + "/session/" + esid + "/message?limit=1", {
         headers: h, signal: AbortSignal.timeout(5000),
       });
-      if (mr.ok) {
-        const msgs = await mr.json();
-        const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
-        // 检查是否 assistant 回复就绪
-        if (last?.info?.role === "assistant" && last?.parts) {
-          const reply = last.parts.filter(p => p.type === "text").map(p => p.text).join("");
-          if (reply) {
-            logger.info("opencode", "polling got reply", { sid, len: reply.length, polls: i + 1 });
-            return { text: reply, parts: last.parts, info: last.info || null };
-          }
+      if (!mr.ok) continue;
+      const msgs = await mr.json();
+      const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
+      if (last?.info?.role !== "assistant" || !last?.parts) continue;
+
+      const reply = last.parts.filter(p => p.type === "text").map(p => p.text).join("");
+      if (!reply) continue;
+
+      // 有新内容 → 回调通知 bridge.js
+      if (reply !== lastText && onDelta) {
+        onDelta(reply);
+      }
+
+      // state=completed 或文本连续 3 轮不变 → 完成
+      if (last.info.state === "completed") {
+        logger.info("opencode", "polling: state=completed", { sid, len: reply.length, polls: i + 1 });
+        return { text: reply, parts: last.parts, info: last.info || null };
+      }
+
+      if (reply === lastText) {
+        stableCount++;
+        if (stableCount >= 3) {
+          logger.info("opencode", "polling: text stable x3", { sid, len: reply.length, polls: i + 1 });
+          return { text: reply, parts: last.parts, info: last.info || null };
         }
+      } else {
+        stableCount = 0;
+        lastText = reply;
       }
     } catch (err) {
       logger.debug("opencode", `poll #${i + 1} failed`, { err: err.message });

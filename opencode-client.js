@@ -292,10 +292,10 @@ export async function startOpenCodeServer() {
 export function stopOpenCodeServer() {}
 
 /**
- * 流式发送消息到 agent：
+ * 异步发送消息到 agent：
  * 1. prompt_async 异步发送（立即返回 204）
- * 2. 监听 /global/event SSE，等待 session.idle
- * 3. AI 完成后 GET 完整回复
+ * 2. 轮询 GET /session/:id/message?limit=1 每 2s 检查回复
+ * 3. 收到 assistant 回复后返回，最多等 2 分钟
  * 4. 失败自动回退同步 POST /message
  */
 export async function sendToAgentStreaming(userId, text, opts = {}, mediaParts = [], streamOpts = {}) {
@@ -311,119 +311,56 @@ export async function sendToAgentStreaming(userId, text, opts = {}, mediaParts =
   const esid = encodeURIComponent(sid);
   const body = { parts: buildParts(text, mediaParts), ...(getSystemPrompt() ? { system: getSystemPrompt() } : {}) };
 
-  try { return await _streamingRequest(base, h, sid, esid, body, streamOpts); }
+  try { return await _pollingRequest(base, h, sid, esid, body, streamOpts); }
   catch (streamErr) {
-    logger.info("opencode", "SSE 流式失败，回退同步", { err: streamErr.message });
+    logger.info("opencode", "轮询失败，回退同步", { err: streamErr.message });
     return await _syncRequest(base, h, sid, esid, body, userId, targetModel);
   }
 }
 
-async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
+async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
   const { onDelta } = streamOpts;
-  logger.info("opencode", "streaming start", { sid });
+  logger.info("opencode", "polling request start", { sid });
 
-  // 1. 先连 SSE
-  let sseRes;
-  try {
-    sseRes = await fetch(base + "/global/event", {
-      headers: { ...h, "Accept": "text/event-stream" },
-      signal: AbortSignal.timeout(600_000),
-    });
-    if (!sseRes.ok || !sseRes.body) throw new Error(`SSE connect HTTP ${sseRes.status}`);
-  } catch (err) { throw new Error(`SSE 连接失败: ${err.message}`); }
-
-  // 2. 异步发消息
+  // 1. 异步发送消息
   const pr = await fetch(base + "/session/" + esid + "/prompt_async", {
     method: "POST", headers: h, body: JSON.stringify(body),
     signal: AbortSignal.timeout(10000),
   });
   if (pr.status !== 204 && pr.status !== 200) {
-    try { await sseRes.body.cancel(); } catch {}
     const errT = await pr.text().catch(() => "");
     throw new Error(`prompt_async HTTP ${pr.status} ${errT.slice(0, 200)}`);
   }
-  logger.info("opencode", "prompt_async sent", { sid });
+  logger.info("opencode", "prompt_async sent, polling for reply", { sid });
 
-  // 3. SSE reader, max 10s wait for idle then fallback to sync
-  // SSE 格式: event: <type>\ndata: <json>\n\n
-  let fullText = "", done = false, sseBuf = "";
-  const reader = sseRes.body.getReader(), decoder = new TextDecoder();
-  const sseDeadline = Date.now() + 10_000;
-  let eventCount = 0;
+  // 2. 轮询 GET /message，每 2 秒检查一次，最多 2 分钟
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const POLL_MAX = 60; // 60 x 2s = 2 分钟
 
-  try {
-    while (!done && Date.now() < sseDeadline) {
-      const v = await Promise.race([
-        reader.read(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("sse read timeout")), 10_000)),
-      ]);
-      const { value, done: d } = v;
-      if (d) break;
-      sseBuf += decoder.decode(value, { stream: true });
-
-      // SSE 事件由 \n\n 分隔
-      const blocks = sseBuf.split("\n\n"); sseBuf = blocks.pop();
-      for (const block of blocks) {
-        let eventType = "";
-        let dataJson = null;
-
-        // 解析 event: 和 data: 行
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event:")) eventType = line.slice(6).trim();
-          if (line.startsWith("data:")) {
-            try { dataJson = JSON.parse(line.slice(5).trim()); } catch {}
+  for (let i = 0; i < POLL_MAX; i++) {
+    await sleep(2000);
+    try {
+      const mr = await fetch(base + "/session/" + esid + "/message?limit=1", {
+        headers: h, signal: AbortSignal.timeout(5000),
+      });
+      if (mr.ok) {
+        const msgs = await mr.json();
+        const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
+        // 检查是否 assistant 回复就绪
+        if (last?.info?.role === "assistant" && last?.parts) {
+          const reply = last.parts.filter(p => p.type === "text").map(p => p.text).join("");
+          if (reply) {
+            logger.info("opencode", "polling got reply", { sid, len: reply.length, polls: i + 1 });
+            return { text: reply, parts: last.parts, info: last.info || null };
           }
         }
-        if (!dataJson) continue;
-
-        eventCount++;
-        // 前 5 个事件打日志诊断
-        if (eventCount <= 5) logger.info("opencode", `SSE event #${eventCount}`, { eventType, keys: Object.keys(dataJson).slice(0, 5).join(","), sessionID: dataJson.sessionID });
-
-        // 匹配我们 session 的事件（sessionID 在 dataJson 根级别）
-        const isOurs = dataJson.sessionID === sid;
-
-        if (eventType === "message.part.delta" && isOurs) {
-          const delta = dataJson.delta || "";
-          if (delta) { fullText += delta; if (onDelta) onDelta(delta); }
-        }
-
-        if (eventType === "session.idle" && isOurs) {
-          logger.info("opencode", "SSE: session.idle received", { sid, textLen: fullText.length });
-          done = true; break;
-        }
-
-        // 诊断：任何 session.idle 都记录（排查字段名不匹配）
-        if (eventType === "session.idle") {
-          logger.debug("opencode", "SSE: idle event seen", { mySession: sid, eventSession: dataJson.sessionID });
-        }
       }
+    } catch (err) {
+      logger.debug("opencode", `poll #${i + 1} failed`, { err: err.message });
     }
-  } catch (err) { logger.warn("opencode", "SSE 读取异常", { err: err.message }); }
-  finally { try { await reader.cancel(); } catch {} }
-
-  if (!done) {
-    logger.info("opencode", "SSE 超时未收到 session.idle，回退同步", { sid, eventsReceived: eventCount, textSoFar: fullText.length });
   }
 
-  // 4. 拉完整回复（SSE delta 可能不全）
-  try {
-    const mr = await fetch(base + "/session/" + esid + "/message?limit=1", {
-      headers: h, signal: AbortSignal.timeout(10000),
-    });
-    if (mr.ok) {
-      const msgs = await mr.json();
-      const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
-      if (last?.parts) {
-        const ct = last.parts.filter(p => p.type === "text").map(p => p.text).join("");
-        if (ct.length > fullText.length) fullText = ct;
-      }
-    }
-  } catch (err) { logger.debug("opencode", "GET message 失败", { err: err.message }); }
-
-  if (!fullText) throw new Error("SSE 流结束但未收到回复");
-  logger.info("opencode", "streaming ok", { sid, len: fullText.length });
-  return { text: fullText, parts: [], info: null };
+  throw new Error("轮询超时（2 分钟）未收到回复");
 }
 
 /** 同步请求（流式失败的回退） */

@@ -344,10 +344,11 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
   }
   logger.info("opencode", "prompt_async sent", { sid });
 
-  // 3. SSE reader, max 30s wait for idle then fallback to sync
+  // 3. SSE reader, max 10s wait for idle then fallback to sync
   let fullText = "", done = false, sseBuf = "";
   const reader = sseRes.body.getReader(), decoder = new TextDecoder();
-  const sseDeadline = Date.now() + 30_000; // 30s
+  const sseDeadline = Date.now() + 10_000; // 10s
+  let eventCount = 0;
 
   try {
     while (!done && Date.now() < sseDeadline) {
@@ -365,6 +366,9 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
           if (!line.startsWith("data:")) continue;
           try {
             const e = JSON.parse(line.slice(5).trim());
+            eventCount++;
+            // 前 5 个事件打日志，方便排查 SSE 问题
+            if (eventCount <= 5) logger.info("opencode", `SSE event #${eventCount}`, { type: e.type, sessionID: e.properties?.sessionID, hasDelta: !!e.properties?.delta });
             if (e.type === "message.part.delta" && e.properties?.sessionID === sid) {
               const delta = e.properties?.delta || "";
               if (delta) { fullText += delta; if (onDelta) onDelta(delta); }
@@ -373,6 +377,10 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
               logger.info("opencode", "SSE: session.idle", { sid, textLen: fullText.length });
               done = true; break;
             }
+            // 诊断：任何 session.idle 事件都记录（排查字段名不匹配）
+            if (e.type === "session.idle") {
+              logger.debug("opencode", "SSE: idle event seen", { mine: sid, theirs: e.properties?.sessionID, keys: Object.keys(e.properties || {}) });
+            }
           } catch {}
         }
         if (done) break;
@@ -380,6 +388,10 @@ async function _streamingRequest(base, h, sid, esid, body, streamOpts) {
     }
   } catch (err) { logger.warn("opencode", "SSE 读取异常", { err: err.message }); }
   finally { try { await reader.cancel(); } catch {} }
+
+  if (!done) {
+    logger.info("opencode", "SSE 超时未收到 session.idle，回退同步", { sid, eventsReceived: eventCount, textSoFar: fullText.length });
+  }
 
   // 4. 拉完整回复（SSE delta 可能不全）
   try {

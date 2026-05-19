@@ -42,6 +42,7 @@ import {
   startOpenCodeServer,
   stopOpenCodeServer,
   sendToAgent,
+  sendToAgentStreaming,
   resetSession,
   getOpenCodePort,
   getOpenCodeAuth,
@@ -781,13 +782,24 @@ async function sendToAgentWithReply(userId, text, mediaParts, { token, baseUrl, 
   progressTimer = setTimeout(progressTick, PROGRESS_INTERVAL_MS);
 
   try {
-    // 调用 OpenCode agent
+    // 调用 OpenCode agent（优先流式，失败回退同步）
     const cfg = getConfig();
     const prefs = userPrefs.get(userId) || {};
     const currentModel = prefs.model || cfg.opencodeModel || "deepseek-v4-pro";
     const agentOpts = {};
-    logger.debug("bridge", `🤖 调用 agent`, { from: userId, hasMedia: mediaParts.length > 0, model: currentModel });
-    const result = await sendToAgent(userId, text, { ...prefs, ...agentOpts }, mediaParts);
+    logger.debug("bridge", `🤖 调用 agent (streaming)`, { from: userId, hasMedia: mediaParts.length > 0, model: currentModel });
+
+    let result;
+    try {
+      // 优先用流式：prompt_async + SSE，更快拿到回复
+      result = await sendToAgentStreaming(userId, text, { ...prefs, ...agentOpts }, mediaParts, {
+        onDelta: () => {}, // 暂不逐字推送到微信
+      });
+    } catch (streamErr) {
+      // 流式失败，回退到同步模式（sendToAgent 内部会再试一次）
+      logger.info("bridge", "流式发送失败，回退同步", { err: streamErr.message });
+      result = await sendToAgent(userId, text, { ...prefs, ...agentOpts }, mediaParts);
+    }
     const aiMs = Date.now() - startTime;
 
     // 停止进度提示

@@ -73,15 +73,17 @@ function headers() {
 
 /**
  * 从 parts 数组中提取回复文本
- * 优先取 text 类型，为空时回退到 reasoning/thinking 类型
- * 解决 DeepSeek 等模型将复杂回复放在 reasoning part 导致空回复的问题
+ * 优先取 text 类型，为空时按 allowReasoningFallback 决定是否回退 reasoning
+ *
+ * @param {Array} parts - 回复的 parts 数组
+ * @param {boolean} [allowReasoningFallback=true] - text 为空时是否回退 reasoning
+ *   轮询阶段应设为 false（等 text 就绪），同步/回退阶段可设为 true（最后兜底）
  */
-function extractReplyText(parts) {
+function extractReplyText(parts, allowReasoningFallback = true) {
   if (!Array.isArray(parts)) return "";
-  // 优先 text 类型
   const textParts = parts.filter(p => p.type === "text").map(p => p.text).join("");
   if (textParts.trim()) return textParts;
-  // 回退到 reasoning / thinking 类型
+  if (!allowReasoningFallback) return "";
   const reasoning = parts.filter(p => p.type === "reasoning" || p.type === "thinking").map(p => p.text).join("");
   return reasoning;
 }
@@ -371,7 +373,7 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
         continue;
       }
 
-      const reply = extractReplyText(last.parts);
+      const reply = extractReplyText(last.parts, false); // 轮询阶段只认 text，不等 reasoning 就绪不算完成
       if (!reply) continue;
 
       // 有新内容 → 回调通知 bridge.js

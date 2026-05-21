@@ -2,7 +2,6 @@
   "wechatToken": "",
   "opencodeAgent": "build",
   "opencodeModel": "deepseek/deepseek-v4-pro",
-  "opencodeVisionModel": "",
   "opencodeSystemPromptFile": "prompt.txt",
   "allowFrom": []
 }

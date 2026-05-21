@@ -54,7 +54,7 @@ export class StreamingMarkdownFilter {
       const prevInl = this.inl;
 
       if (this.fence) out += this._pumpFence(eof);
-      else if (this.inl) out += this._pumpInline(eof);
+      else if (this.inl) out += this._pumpInline();
       else if (this.sol) out += this._pumpSOL(eof);
       else out += this._pumpBody(eof);
 
@@ -287,7 +287,7 @@ export class StreamingMarkdownFilter {
   }
 
   /** 内联格式内：累积直到闭合标记 */
-  _pumpInline(_eof) {
+  _pumpInline() {
     if (!this.inl) return "";
     this.inl.acc += this.buf;
     this.buf = "";

@@ -71,6 +71,21 @@ function headers() {
   return { "Content-Type": "application/json" };
 }
 
+/**
+ * 从 parts 数组中提取回复文本
+ * 优先取 text 类型，为空时回退到 reasoning/thinking 类型
+ * 解决 DeepSeek 等模型将复杂回复放在 reasoning part 导致空回复的问题
+ */
+function extractReplyText(parts) {
+  if (!Array.isArray(parts)) return "";
+  // 优先 text 类型
+  const textParts = parts.filter(p => p.type === "text").map(p => p.text).join("");
+  if (textParts.trim()) return textParts;
+  // 回退到 reasoning / thinking 类型
+  const reasoning = parts.filter(p => p.type === "reasoning" || p.type === "thinking").map(p => p.text).join("");
+  return reasoning;
+}
+
 // ============================================================
 // Session
 // ============================================================
@@ -262,15 +277,15 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
           throw new Error(`retry HTTP ${r2.status}: ${retryBody.slice(0, 300)}`);
         }
         const r2j = await r2.json();
-        const t2 = (r2j.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
+        const t2 = extractReplyText(r2j.parts || []);
         return { text: t2, parts: r2j.parts || [], info: r2j.info || null };
       }
       throw new Error(`HTTP ${res.status}: ${errBody.slice(0, 300)}`);
     }
 
     const result = await res.json();
-    const reply = (result.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
-    logger.info("opencode", "reply ok", { sid, len: reply.length });
+    const reply = extractReplyText(result.parts || []);
+    logger.info("opencode", "reply ok", { sid, len: reply.length, preview: reply.slice(0, 200) });
     return { text: reply, parts: result.parts || [], info: result.info || null };
   } catch (err) {
     clearTimeout(tm);
@@ -281,12 +296,6 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
 
 export async function checkHealth() {
   try { const d = await detect(); return !!d; } catch { return false; }
-}
-
-export async function startOpenCodeServer() {
-  const d = await detect();
-  if (d) { console.log("OK desktop OpenCode (" + d.port + ")"); return true; }
-  return false;
 }
 
 export function stopOpenCodeServer() {}
@@ -344,12 +353,25 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
       const mr = await fetch(base + "/session/" + esid + "/message?limit=1", {
         headers: h, signal: AbortSignal.timeout(5000),
       });
-      if (!mr.ok) continue;
+      if (!mr.ok) {
+        // 首次或每 10 次记录一次，避免刷屏
+        if (i === 0 || i % 10 === 0) {
+          logger.info("opencode", `poll #${i + 1}: GET /message HTTP ${mr.status}`, { sid });
+        }
+        continue;
+      }
       const msgs = await mr.json();
       const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
-      if (last?.info?.role !== "assistant" || !last?.parts) continue;
+      if (last?.info?.role !== "assistant" || !last?.parts) {
+        if (i === 0 || i % 10 === 0) {
+          const role = last?.info?.role || "(none)";
+          const partCount = last?.parts?.length ?? 0;
+          logger.info("opencode", `poll #${i + 1}: no assistant reply (role=${role}, parts=${partCount})`, { sid });
+        }
+        continue;
+      }
 
-      const reply = last.parts.filter(p => p.type === "text").map(p => p.text).join("");
+      const reply = extractReplyText(last.parts);
       if (!reply) continue;
 
       // 有新内容 → 回调通知 bridge.js
@@ -359,14 +381,14 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
 
       // state=completed 或文本连续 3 轮不变 → 完成
       if (last.info.state === "completed") {
-        logger.info("opencode", "polling: state=completed", { sid, len: reply.length, polls: i + 1 });
+        logger.info("opencode", "polling: state=completed", { sid, len: reply.length, polls: i + 1, preview: reply.slice(0, 200) });
         return { text: reply, parts: last.parts, info: last.info || null };
       }
 
       if (reply === lastText) {
         stableCount++;
         if (stableCount >= 3) {
-          logger.info("opencode", "polling: text stable x3", { sid, len: reply.length, polls: i + 1 });
+          logger.info("opencode", "polling: text stable x3", { sid, len: reply.length, polls: i + 1, preview: reply.slice(0, 200) });
           return { text: reply, parts: last.parts, info: last.info || null };
         }
       } else {
@@ -374,7 +396,9 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
         lastText = reply;
       }
     } catch (err) {
-      logger.debug("opencode", `poll #${i + 1} failed`, { err: err.message });
+      if (i === 0 || i % 10 === 0) {
+        logger.info("opencode", `poll #${i + 1} fetch error: ${err.message.slice(0, 80)}`, { sid });
+      }
     }
   }
 
@@ -401,8 +425,8 @@ async function _syncRequest(base, h, sid, esid, body, userId, targetModel) {
       throw new Error(`HTTP ${res.status}: ${eb.slice(0, 300)}`);
     }
     const r = await res.json();
-    const reply = (r.parts || []).filter(p => p.type === "text").map(p => p.text).join("");
-    logger.info("opencode", "sync ok", { sid, len: reply.length });
+    const reply = extractReplyText(r.parts || []);
+    logger.info("opencode", "sync ok", { sid, len: reply.length, preview: reply.slice(0, 200) });
     return { text: reply, parts: r.parts || [], info: r.info || null };
   } catch (err) {
     clearTimeout(tm);

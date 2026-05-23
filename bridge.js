@@ -55,7 +55,6 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const BACKOFF_DELAY_MS = 30000;
 const RETRY_DELAY_MS = 2000;
 const SESSION_EXPIRED_ERRCODE = -14;
-const SESSION_PAUSE_MS = 60 * 60 * 1000; // 1 小时
 
 // ======== CLI Args ========
 
@@ -122,7 +121,6 @@ async function mainLoop({ token, baseUrl }) {
   let getUpdatesBuf = loadGetUpdatesBuf(ACCOUNT_ID) ?? "";
   let longPollTimeoutMs = DEFAULT_LONG_POLL_MS;
   let consecutiveFailures = 0;
-  let sessionPausedUntil = 0;
 
   // 通知微信：网关已启动
   try {
@@ -241,14 +239,6 @@ async function mainLoop({ token, baseUrl }) {
   // === 主循环 ===
   while (!abortController.signal.aborted) {
     try {
-      // 会话暂停检查
-      if (sessionPausedUntil > Date.now()) {
-        const remaining = Math.ceil((sessionPausedUntil - Date.now()) / 1000);
-        logger.info("bridge", `会话暂停中，剩余 ${remaining}s`);
-        await sleep(Math.min(remaining * 1000, 60000), abortController.signal);
-        continue;
-      }
-
       // 长轮询收消息
       const resp = await getUpdates({
         baseUrl,
@@ -269,13 +259,28 @@ async function mainLoop({ token, baseUrl }) {
         (resp.errcode !== undefined && resp.errcode !== 0);
 
       if (isApiError) {
-        // 会话过期
+        // 会话过期（token 失效，例如在其他设备登录）
         if (resp.errcode === SESSION_EXPIRED_ERRCODE || resp.ret === SESSION_EXPIRED_ERRCODE) {
-          sessionPausedUntil = Date.now() + SESSION_PAUSE_MS;
-          logger.error("bridge", `会话过期 (errcode=${SESSION_EXPIRED_ERRCODE})，暂停 1 小时`);
-          console.error(`⏸️  微信会话过期，暂停 60 分钟...`);
-          consecutiveFailures = 0;
-          continue;
+          logger.warn("bridge", `会话过期 (errcode=${SESSION_EXPIRED_ERRCODE})，token 已失效`);
+
+          try {
+            // 清掉旧 token
+            saveToken("");
+            logger.info("bridge", "旧 token 已清除");
+
+            // 触发重新登录
+            console.log("\n⚠️  微信会话已过期（可能在别处登录了），正在重新登录...\n");
+            const result = await wechatQrLogin({ baseUrl });
+            saveToken(result.botToken);
+            console.log(`✅ 重新登录成功！新 Bot ID: ${result.accountId}`);
+            logger.info("bridge", "重新登录成功", { accountId: result.accountId });
+          } catch (loginErr) {
+            console.error("❌ 重新登录失败:", loginErr.message);
+            logger.error("bridge", "重新登录失败", loginErr);
+          }
+
+          console.log("\n🔄 请重新启动 openchat 以使用新 token\n");
+          process.exit(0);
         }
 
         // 其他 API 错误
@@ -299,7 +304,6 @@ async function mainLoop({ token, baseUrl }) {
 
       // 成功
       consecutiveFailures = 0;
-      sessionPausedUntil = 0;
 
       // 保存同步游标
       if (resp.get_updates_buf) {

@@ -6,19 +6,15 @@
 
 ### 方法一：一键命令（推荐）
 
-在终端里粘贴下面这一行，回车即装即用：
+在 OpenCode 内置终端（Ctrl+`）里粘贴下面这一行：
 
 ```powershell
-Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你在微信环境里和用户聊天。回复要像微信消息一样简短自然。'; node bridge.js
+Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你在微信环境里和用户聊天。回复要像微信消息一样简短自然。'; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
 ```
 
 首次运行会弹二维码图片，用微信扫码登录。
 
-之后再次启动：
-
-```powershell
-Set-Location "$HOME\Desktop\openchat"; node bridge.js
-```
+之后任何时候在终端输入 `openchat` 即可启动。
 
 ### 方法二：手动安装
 
@@ -56,8 +52,12 @@ npm.cmd install
 |------|------|
 | 系统 | Windows 10 / 11 |
 | Node.js | v18+（推荐 v20+） |
+| 终端 | **必须**用 OpenCode 内置终端（`Ctrl+`\`），否则无法获取认证密钥 |
 | OpenCode | 桌面版正在运行 |
-| 终端 | 推荐用 OpenCode 内置终端（`Ctrl+``） |
+
+> ⚠️ **openchat 只能在 OpenCode 内置终端运行**。  
+> 原因：OpenCode 只在启动时注入 `OPENCODE_SERVER_PASSWORD` 环境变量到内置终端，  
+> 外部 PowerShell / CMD 无法获取此密钥，桥接会报错退出。
 
 ---
 
@@ -187,6 +187,18 @@ OpenCode 桌面版 (127.0.0.1:随机端口)
     ▼
 微信用户 (收到回复)
 ```
+
+---
+
+## 重置登录
+
+换了微信？清除当前登录状态：
+
+```powershell
+openchat --reset
+```
+
+下次运行 `openchat` 时会弹出新二维码，扫码即可绑定新微信。
 
 ---
 

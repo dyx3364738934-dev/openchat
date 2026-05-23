@@ -21,7 +21,7 @@
  *   OPENCODE_MODEL           Model (default: deepseek-v4-pro)
  */
 
-import { getConfig, saveToken, getSystemPrompt } from "./config.js";
+import { getConfig, saveToken, getSystemPrompt, OC_PREFIX } from "./config.js";
 import { logger } from "./logger.js";
 import { wechatQrLogin } from "./wechat-auth.js";
 import {
@@ -71,6 +71,7 @@ function parseArgs() {
     loginOnly: args.includes("--login-only"),
     noLogWindow: args.includes("--no-log-window"),
     noAutoStart: args.includes("--no-auto-start"),
+    resetToken: args.includes("--reset"),
     manualToken,
   };
 }
@@ -348,11 +349,28 @@ async function mainLoop({ token, baseUrl }) {
 async function main() {
   const args = parseArgs();
 
+  // --reset: 清除已保存的微信 token，下次启动重新扫码
+  if (args.resetToken) {
+    saveToken("");
+    console.log("✅ 已清除微信登录状态");
+    console.log("   重新运行 openchat 即可扫码登录新微信\n");
+    process.exit(0);
+  }
+
   console.log("╔══════════════════════════════════════════╗");
   console.log("║        OpenChat — WeChat + OpenCode     ║");
+  console.log("║       --reset 清除登录 / --help        ║");
   console.log("╚══════════════════════════════════════════╝\n");
 
   const config = getConfig();
+
+  // 检查是否在 OpenCode 内置终端运行
+  if (!process.env[OC_PREFIX + "SERVER_PASSWORD"] && !process.env[OC_PREFIX + "PASSWORD"]) {
+    console.error("⚠️  未检测到 OpenCode 认证密钥");
+    console.error("   openchat 只能在 OpenCode 内置终端 (Ctrl+`) 运行");
+    console.error("   OpenCode 只在启动时注入密钥到内置终端\n");
+    process.exit(1);
+  }
 
   // 日志窗口
   if (!args.noLogWindow) {

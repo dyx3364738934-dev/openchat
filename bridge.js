@@ -358,8 +358,10 @@ async function main() {
   }
 
   console.log("╔══════════════════════════════════════════╗");
-  console.log("║        OpenChat — WeChat + OpenCode     ║");
-  console.log("║       --reset 清除登录 / --help        ║");
+  console.log("║     OpenChat — WeChat + OpenCode       ║");
+  console.log("╠══════════════════════════════════════════╣");
+  console.log("║  微信命令: /model /reset /status /help ║");
+  console.log("║  终端: openchat --reset  清除登录     ║");
   console.log("╚══════════════════════════════════════════╝\n");
 
   const config = getConfig();

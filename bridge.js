@@ -355,7 +355,8 @@ async function main() {
   // --reset: 清除已保存的微信 token，下次启动重新扫码
   if (args.resetToken) {
     saveToken("");
-    console.log("✅ 已清除微信登录状态");
+    clearAllContextTokens(ACCOUNT_ID);
+    console.log("✅ 已清除微信登录状态和会话缓存");
     console.log("   重新运行 openchat 即可扫码登录新微信\n");
     process.exit(0);
   }

@@ -208,12 +208,14 @@ async function mainLoop({ token, baseUrl }) {
 
         if (text.trim()) {
           warmedUp = true;
-          logger.info("bridge", `模型暖机完成 (第${attempt}次)`, { len: text.length, preview: text.slice(0, 200) });
 
           // 有历史用户时才发欢迎消息
           if (savedUsers.length > 0 && cfg.welcomeEnabled) {
             const { userId: firstUser, token: ctxToken } = savedUsers[0];
+            logger.info("bridge", `模型暖机完成，发送欢迎消息`, { len: text.length, preview: text.slice(0, 200) });
             await sendMessage({ baseUrl, token, toUserId: firstUser, text, contextToken: ctxToken });
+          } else {
+            logger.info("bridge", "模型暖机完成，无历史用户跳过欢迎消息");
           }
           break;
         }

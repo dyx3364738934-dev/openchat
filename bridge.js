@@ -41,6 +41,7 @@ import {
   getAllContextTokens,
   saveGetUpdatesBuf,
   loadGetUpdatesBuf,
+  clearAllContextTokens,
 } from "./session-store.js";
 
 // src/ 模块化导入
@@ -103,6 +104,8 @@ async function ensureLogin(args) {
 
   // 保存 token
   saveToken(result.botToken);
+  // 清除旧会话的 context token（重新登录后失效）
+  clearAllContextTokens(ACCOUNT_ID);
   console.log(`\n✅ 登录成功！Bot ID: ${result.accountId}`);
   console.log(`   用户 ID: ${result.userId}\n`);
   logger.info("bridge", "QR 登录成功", {

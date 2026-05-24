@@ -92,6 +92,23 @@ export function getAllContextTokens(accountId) {
   return result;
 }
 
+/** 清除指定 account 的所有 context token（内存+磁盘） */
+export function clearAllContextTokens(accountId) {
+  const prefix = `${accountId}:`;
+  for (const key of contextTokenStore.keys()) {
+    if (key.startsWith(prefix)) contextTokenStore.delete(key);
+  }
+  // 删除磁盘文件
+  const tokenPath = resolveContextTokenPath(accountId);
+  if (existsSync(tokenPath)) {
+    try { fsp.unlink(tokenPath).catch(() => {}); } catch {}
+  }
+  const syncPath = resolveSyncBufPath(accountId);
+  if (existsSync(syncPath)) {
+    try { fsp.unlink(syncPath).catch(() => {}); } catch {}
+  }
+}
+
 // ======== Sync Buffer Store ========
 
 function resolveSyncBufPath(accountId) {

@@ -189,54 +189,47 @@ async function mainLoop({ token, baseUrl }) {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-  // 模型暖机：发送同步消息直到模型返回非空内容
-  // 解决 OpenCode 重启后模型冷启动导致前几条消息空回复的问题
+// 模型暖机：确保 OpenCode 模型就绪
+  // 首次启动或重启时，模型可能冷启动导致前几条消息空回复
   if (sp) {
     const savedUsers = getAllContextTokens(ACCOUNT_ID);
-    if (savedUsers.length > 0) {
-      const { userId: firstUser, token: ctxToken } = savedUsers[0];
 
-      const maxRetries = 8;
-      const retryDelayMs = 15_000;
-      let warmedUp = false;
+    const maxRetries = 8;
+    const retryDelayMs = 15_000;
+    let warmedUp = false;
 
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        if (abortController.signal.aborted) break;
-        try {
-          logger.info("bridge", `模型暖机 (${attempt}/${maxRetries})`, { userId: firstUser });
-          const result = await sendToAgent(firstUser, "你好");
-          const wf = new StreamingMarkdownFilter();
-          const text = wf.feed(result.text) + wf.flush();
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (abortController.signal.aborted) break;
+      try {
+        logger.info("bridge", `模型暖机 (${attempt}/${maxRetries})`);
+        const result = await sendToAgent("_warmup_", "你好");
+        const wf = new StreamingMarkdownFilter();
+        const text = wf.feed(result.text) + wf.flush();
 
-          if (text.trim()) {
-            warmedUp = true;
-            logger.info("bridge", `模型暖机完成 (第${attempt}次)`, { userId: firstUser, len: text.length, preview: text.slice(0, 200) });
-            if (cfg.welcomeEnabled) {
-              await sendMessage({ baseUrl, token, toUserId: firstUser, text, contextToken: ctxToken });
-            }
-            break;
+        if (text.trim()) {
+          warmedUp = true;
+          logger.info("bridge", `模型暖机完成 (第${attempt}次)`, { len: text.length, preview: text.slice(0, 200) });
+
+          // 有历史用户时才发欢迎消息
+          if (savedUsers.length > 0 && cfg.welcomeEnabled) {
+            const { userId: firstUser, token: ctxToken } = savedUsers[0];
+            await sendMessage({ baseUrl, token, toUserId: firstUser, text, contextToken: ctxToken });
           }
-
-          if (attempt < maxRetries) {
-            console.log(`⏳ 模型暖机中... (${attempt}/${maxRetries})，${retryDelayMs / 1000}s 后重试`);
-            await sleep(retryDelayMs, abortController.signal);
-          }
-        } catch (err) {
-          if (abortController.signal.aborted) break;
-          logger.warn("bridge", `暖机第${attempt}次失败`, { err: err.message });
-          if (attempt < maxRetries) {
-            console.log(`⏳ 暖机出错，${retryDelayMs / 1000}s 后重试 (${attempt}/${maxRetries})...`);
-            await sleep(retryDelayMs, abortController.signal);
-          }
+          break;
         }
-      }
 
-      if (!warmedUp && !abortController.signal.aborted) {
-        console.log("⚠️ 模型暖机超时（最多 2 分钟），消息可能延迟响应");
-        logger.warn("bridge", "模型暖机超时，进入主循环");
+        if (attempt < maxRetries) {
+          console.log(`⏳ 模型暖机中... (${attempt}/${maxRetries})，${retryDelayMs / 1000}s 后重试`);
+          await sleep(retryDelayMs, abortController.signal);
+        }
+      } catch (err) {
+        logger.warn("bridge", `模型暖机失败 (${attempt}/${maxRetries})`, { err: err.message });
+        if (attempt < maxRetries) await sleep(retryDelayMs, abortController.signal);
       }
-    } else {
-      console.log("   （无已连接用户，跳过暖机）");
+    }
+
+    if (!warmedUp) {
+      logger.warn("bridge", "模型暖机未成功，首条消息可能延迟");
     }
   }
 

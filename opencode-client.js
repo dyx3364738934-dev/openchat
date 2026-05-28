@@ -322,31 +322,43 @@ export async function sendToAgentStreaming(userId, text, opts = {}, mediaParts =
   const esid = encodeURIComponent(sid);
   const body = { parts: buildParts(text, mediaParts), ...(getSystemPrompt() ? { system: getSystemPrompt() } : {}) };
 
-  try { return await _pollingRequest(base, h, sid, esid, body, streamOpts); }
-  catch (streamErr) {
-    logger.info("opencode", "轮询失败，回退同步", { err: streamErr.message });
-    return await _syncRequest(base, h, sid, esid, body, userId, targetModel);
-  }
+  return await _pollingRequest(base, h, sid, esid, body, streamOpts);
 }
 
 async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
-  const { onDelta } = streamOpts;
   logger.info("opencode", "polling request start", { sid });
 
-  // 1. 异步发送消息
-  const pr = await fetch(base + "/session/" + esid + "/prompt_async", {
-    method: "POST", headers: h, body: JSON.stringify(body),
-    signal: AbortSignal.timeout(10000),
-  });
-  if (pr.status !== 204 && pr.status !== 200) {
-    const errT = await pr.text().catch(() => "");
-    throw new Error(`prompt_async HTTP ${pr.status} ${errT.slice(0, 200)}`);
+  // 1. 异步发送消息（prompt_async 可能被某些版本拒绝）
+  try {
+    const pr = await fetch(base + "/session/" + esid + "/prompt_async", {
+      method: "POST", headers: h, body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (pr.status !== 204 && pr.status !== 200) {
+      const errT = await pr.text().catch(() => "");
+      // prompt_async 被拒绝 → 回退同步 POST（不回退就发不出去）
+      logger.info("opencode", "prompt_async 被拒绝，回退同步", { status: pr.status });
+      return await _syncRequest(base, h, sid, esid, body, null, null);
+    }
+    logger.info("opencode", "prompt_async sent, polling for reply", { sid });
+  } catch (promptErr) {
+    // prompt_async 网络/超时失败 → 回退同步 POST
+    logger.info("opencode", "prompt_async 发送失败，回退同步", { err: promptErr.message });
+    return await _syncRequest(base, h, sid, esid, body, null, null);
   }
-  logger.info("opencode", "prompt_async sent, polling for reply", { sid });
 
-  // 2. 轮询 GET /message，每 2 秒一次，最多 2 分钟
+  // 2. 轮询等待回复（prompt_async 已成功，不回退到 POST /message）
+  return await _pollForReply(base, h, sid, esid, body, streamOpts);
+}
+
+/**
+ * 纯轮询：prompt_async 已发送，只等 assistant 回复就绪
+ * 不回退到 POST /message（避免重复发送）
+ */
+async function _pollForReply(base, h, sid, esid, body, streamOpts) {
+  const { onDelta } = streamOpts;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const POLL_MAX = 60;
+  const POLL_MAX = 140; // 140 x 2s = ~5 分钟
   let lastText = "", stableCount = 0;
 
   for (let i = 0; i < POLL_MAX; i++) {

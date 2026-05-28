@@ -38,7 +38,6 @@ import {
 import { StreamingMarkdownFilter } from "./markdown-filter.js";
 import {
   restoreContextTokens,
-  getAllContextTokens,
   saveGetUpdatesBuf,
   loadGetUpdatesBuf,
   clearAllContextTokens,
@@ -189,11 +188,8 @@ async function mainLoop({ token, baseUrl }) {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-// 模型暖机：确保 OpenCode 模型就绪
-  // 首次启动或重启时，模型可能冷启动导致前几条消息空回复
+// 模型暖机：确保 OpenCode 模型就绪，不发欢迎消息
   if (sp) {
-    const savedUsers = getAllContextTokens(ACCOUNT_ID);
-
     const maxRetries = 8;
     const retryDelayMs = 15_000;
     let warmedUp = false;
@@ -206,17 +202,9 @@ async function mainLoop({ token, baseUrl }) {
         const wf = new StreamingMarkdownFilter();
         const text = wf.feed(result.text) + wf.flush();
 
-        if (text.trim()) {
+if (text.trim()) {
           warmedUp = true;
-
-          // 有历史用户时才发欢迎消息
-          if (savedUsers.length > 0 && cfg.welcomeEnabled) {
-            const { userId: firstUser, token: ctxToken } = savedUsers[0];
-            logger.info("bridge", `模型暖机完成，发送欢迎消息`, { len: text.length, preview: text.slice(0, 200) });
-            await sendMessage({ baseUrl, token, toUserId: firstUser, text, contextToken: ctxToken });
-          } else {
-            logger.info("bridge", "模型暖机完成，无历史用户跳过欢迎消息");
-          }
+          logger.info("bridge", "模型暖机完成", { len: text.length, attempts: attempt });
           break;
         }
 

@@ -92,11 +92,6 @@ function loadConfig() {
       if (ev !== undefined && ev !== "") return ev.toLowerCase() !== "false" && ev !== "0";
       return fc.welcomeEnabled ?? true;
     })(),
-    // 定时主动消息：每 N 分钟注入一条提示，AI 回复后自动发送到微信
-    // config.json: { "scheduledPrompt": "你好，有什么要提醒的吗？", "scheduledIntervalMinutes": 30 }
-    // 不配置或 interval=0 则不启用
-    scheduledPrompt: fc.scheduledPrompt || null,
-    scheduledIntervalMinutes: parseInt(fc.scheduledIntervalMinutes) || 0,
     // 付费模型白名单（不在白名单中的付费模型不显示）
     paidAllowlist: new Set(fc.paidAllowlist || [
       "deepseek/deepseek-v4-pro",

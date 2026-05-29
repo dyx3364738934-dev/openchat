@@ -38,6 +38,7 @@ import {
 import { StreamingMarkdownFilter } from "./markdown-filter.js";
 import {
   restoreContextTokens,
+  getAllContextTokens,
   saveGetUpdatesBuf,
   loadGetUpdatesBuf,
   clearAllContextTokens,
@@ -221,6 +222,28 @@ if (text.trim()) {
     if (!warmedUp) {
       logger.warn("bridge", "模型暖机未成功，首条消息可能延迟");
     }
+  }
+
+  // 定时主动消息：每 N 分钟给 AI 注入提示
+  if (cfg.scheduledPrompt && cfg.scheduledIntervalMinutes > 0) {
+    const intervalMs = cfg.scheduledIntervalMinutes * 60 * 1000;
+    console.log(`⏰ 定时消息已启用：每 ${cfg.scheduledIntervalMinutes} 分钟发送`);
+    const timer = setInterval(async () => {
+      const savedUsers = getAllContextTokens(ACCOUNT_ID);
+      if (savedUsers.length === 0) return;
+      const { userId, token: ctxToken } = savedUsers[0];
+      try {
+        const result = await sendToAgent(userId, cfg.scheduledPrompt);
+        if (result.text && result.text.trim()) {
+          await sendMessage({ baseUrl, token, toUserId: userId, text: result.text, contextToken: ctxToken });
+          logger.info("bridge", "定时消息已发送", { to: userId, len: result.text.length });
+        }
+      } catch (err) {
+        logger.warn("bridge", "定时消息失败", { err: err.message });
+      }
+    }, intervalMs);
+    // 退出时清理定时器
+    process.on("exit", () => clearInterval(timer));
   }
 
   // === 主循环 ===

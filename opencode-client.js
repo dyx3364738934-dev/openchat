@@ -322,43 +322,31 @@ export async function sendToAgentStreaming(userId, text, opts = {}, mediaParts =
   const esid = encodeURIComponent(sid);
   const body = { parts: buildParts(text, mediaParts), ...(getSystemPrompt() ? { system: getSystemPrompt() } : {}) };
 
-  return await _pollingRequest(base, h, sid, esid, body, streamOpts);
+  try { return await _pollingRequest(base, h, sid, esid, body, streamOpts); }
+  catch (streamErr) {
+    logger.info("opencode", "轮询失败，回退同步", { err: streamErr.message });
+    return await _syncRequest(base, h, sid, esid, body, userId, targetModel);
+  }
 }
 
 async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
+  const { onDelta } = streamOpts;
   logger.info("opencode", "polling request start", { sid });
 
-  // 1. 异步发送消息（prompt_async 可能被某些版本拒绝）
-  try {
-    const pr = await fetch(base + "/session/" + esid + "/prompt_async", {
-      method: "POST", headers: h, body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10000),
-    });
-    if (pr.status !== 204 && pr.status !== 200) {
-      const errT = await pr.text().catch(() => "");
-      // prompt_async 被拒绝 → 回退同步 POST（不回退就发不出去）
-      logger.info("opencode", "prompt_async 被拒绝，回退同步", { status: pr.status });
-      return await _syncRequest(base, h, sid, esid, body, null, null);
-    }
-    logger.info("opencode", "prompt_async sent, polling for reply", { sid });
-  } catch (promptErr) {
-    // prompt_async 网络/超时失败 → 回退同步 POST
-    logger.info("opencode", "prompt_async 发送失败，回退同步", { err: promptErr.message });
-    return await _syncRequest(base, h, sid, esid, body, null, null);
+  // 1. 异步发送消息
+  const pr = await fetch(base + "/session/" + esid + "/prompt_async", {
+    method: "POST", headers: h, body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (pr.status !== 204 && pr.status !== 200) {
+    const errT = await pr.text().catch(() => "");
+    throw new Error(`prompt_async HTTP ${pr.status} ${errT.slice(0, 200)}`);
   }
+  logger.info("opencode", "prompt_async sent, polling for reply", { sid });
 
-  // 2. 轮询等待回复（prompt_async 已成功，不回退到 POST /message）
-  return await _pollForReply(base, h, sid, esid, body, streamOpts);
-}
-
-/**
- * 纯轮询：prompt_async 已发送，只等 assistant 回复就绪
- * 不回退到 POST /message（避免重复发送）
- */
-async function _pollForReply(base, h, sid, esid, body, streamOpts) {
-  const { onDelta } = streamOpts;
+  // 2. 轮询 GET /message，每 2 秒一次，最多 2 分钟
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const POLL_MAX = 200; // 200 × 2s ≈ 6.7 分钟（工具调用密集时会较慢）
+  const POLL_MAX = 60;
   let lastText = "", stableCount = 0;
 
   for (let i = 0; i < POLL_MAX; i++) {
@@ -368,7 +356,6 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
         headers: h, signal: AbortSignal.timeout(5000),
       });
       if (!mr.ok) {
-        // 首次或每 10 次记录一次，避免刷屏
         if (i === 0 || i % 10 === 0) {
           logger.info("opencode", `poll #${i + 1}: GET /message HTTP ${mr.status}`, { sid });
         }
@@ -380,8 +367,7 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
         if (i < 3 || i % 10 === 0) {
           const role = last?.info?.role || "(none)";
           const partCount = last?.parts?.length ?? 0;
-          const state = last?.info?.state || "(none)";
-          logger.info("opencode", `poll #${i + 1}: no assistant reply (role=${role}, parts=${partCount}, state=${state})`, { sid });
+          logger.info("opencode", `poll #${i + 1}: no assistant reply (role=${role}, parts=${partCount})`, { sid });
         }
         continue;
       }
@@ -391,13 +377,13 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
       const state = last.info?.state || "";
       const stateIsDone = state === "completed" || state === "error" || state === "aborted";
 
-      // 模型已完成但没有 text 部分（纯工具调用、纯 reasoning 等）→ 直接返回
+      // 模型完成但只有 reasoning/thinking 没有 text → 回退到 reasoning
       if (stateIsDone && !reply && replyWithReasoning) {
-        logger.info("opencode", "polling: completed but no text parts, using reasoning", { sid, state, polls: i + 1 });
+        logger.info("opencode", "polling: completed but no text, using reasoning", { sid, polls: i + 1 });
         return { text: replyWithReasoning, parts: last.parts, info: last.info || null };
       }
       if (stateIsDone && !reply && !replyWithReasoning) {
-        logger.info("opencode", "polling: completed but no text/reasoning, empty reply", { sid, state, polls: i + 1 });
+        logger.info("opencode", "polling: completed but empty reply", { sid, polls: i + 1 });
         return { text: "", parts: last.parts, info: last.info || null };
       }
 
@@ -410,29 +396,15 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
 
       // state=completed 或文本连续 3 轮不变 → 完成
       if (last.info.state === "completed") {
-        const finalReply = reply || replyWithReasoning;
-        logger.info("opencode", "polling: state=completed", { sid, len: (finalReply || "").length, polls: i + 1, preview: (finalReply || "").slice(0, 200) });
-        return { text: finalReply || "", parts: last.parts, info: last.info || null };
+        logger.info("opencode", "polling: state=completed", { sid, len: reply.length, polls: i + 1, preview: reply.slice(0, 200) });
+        return { text: reply, parts: last.parts, info: last.info || null };
       }
 
       if (reply === lastText) {
         stableCount++;
-        // text stable x3 只在模型明确完成或处于非运行状态时才触发退出
-        // 模型可能在执行工具调用（tool calls），文本不变但状态仍是 "running"——不应切断
-        const state = last.info?.state || "";
-        const stateIsDone = state === "completed" || state === "error" || state === "aborted";
         if (stableCount >= 3) {
-          if (stateIsDone) {
-            const finalReply = reply || replyWithReasoning;
-            logger.info("opencode", "polling: text stable x3 (state done)", { sid, state, len: (finalReply || "").length, polls: i + 1, preview: (finalReply || "").slice(0, 200) });
-            return { text: finalReply || "", parts: last.parts, info: last.info || null };
-          }
-          // 状态仍在运行中（如 "running"），可能是因为工具调用导致文本暂时不变
-          // 不退出，但把 stableCount 折半，避免工具返回后瞬间累积到阈值
-          if (stableCount % 6 === 0) {
-            logger.info("opencode", "polling: text stable but state running, keep waiting", { sid, state, len: reply.length, stableCount, polls: i + 1 });
-          }
-          stableCount = Math.floor(stableCount / 2);
+          logger.info("opencode", "polling: text stable x3", { sid, len: reply.length, polls: i + 1, preview: reply.slice(0, 200) });
+          return { text: reply, parts: last.parts, info: last.info || null };
         }
       } else {
         stableCount = 0;
@@ -445,7 +417,7 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
     }
   }
 
-  throw new Error(`轮询超时（${POLL_MAX * 2 / 60} 分钟）未收到回复`);
+  throw new Error("轮询超时（2 分钟）未收到回复");
 }
 
 /** 同步请求（流式失败的回退） */

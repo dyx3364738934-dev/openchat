@@ -358,7 +358,7 @@ async function _pollingRequest(base, h, sid, esid, body, streamOpts) {
 async function _pollForReply(base, h, sid, esid, body, streamOpts) {
   const { onDelta } = streamOpts;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const POLL_MAX = 140; // 140 x 2s = ~5 分钟
+  const POLL_MAX = 200; // 200 × 2s ≈ 6.7 分钟（工具调用密集时会较慢）
   let lastText = "", stableCount = 0;
 
   for (let i = 0; i < POLL_MAX; i++) {
@@ -377,15 +377,30 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
       const msgs = await mr.json();
       const last = Array.isArray(msgs) ? msgs[msgs.length - 1] : null;
       if (last?.info?.role !== "assistant" || !last?.parts) {
-        if (i === 0 || i % 10 === 0) {
+        if (i < 3 || i % 10 === 0) {
           const role = last?.info?.role || "(none)";
           const partCount = last?.parts?.length ?? 0;
-          logger.info("opencode", `poll #${i + 1}: no assistant reply (role=${role}, parts=${partCount})`, { sid });
+          const state = last?.info?.state || "(none)";
+          logger.info("opencode", `poll #${i + 1}: no assistant reply (role=${role}, parts=${partCount}, state=${state})`, { sid });
         }
         continue;
       }
 
-      const reply = extractReplyText(last.parts, false); // 轮询阶段只认 text，不等 reasoning 就绪不算完成
+      const reply = extractReplyText(last.parts, false);
+      const replyWithReasoning = extractReplyText(last.parts, true);
+      const state = last.info?.state || "";
+      const stateIsDone = state === "completed" || state === "error" || state === "aborted";
+
+      // 模型已完成但没有 text 部分（纯工具调用、纯 reasoning 等）→ 直接返回
+      if (stateIsDone && !reply && replyWithReasoning) {
+        logger.info("opencode", "polling: completed but no text parts, using reasoning", { sid, state, polls: i + 1 });
+        return { text: replyWithReasoning, parts: last.parts, info: last.info || null };
+      }
+      if (stateIsDone && !reply && !replyWithReasoning) {
+        logger.info("opencode", "polling: completed but no text/reasoning, empty reply", { sid, state, polls: i + 1 });
+        return { text: "", parts: last.parts, info: last.info || null };
+      }
+
       if (!reply) continue;
 
       // 有新内容 → 回调通知 bridge.js
@@ -395,15 +410,29 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
 
       // state=completed 或文本连续 3 轮不变 → 完成
       if (last.info.state === "completed") {
-        logger.info("opencode", "polling: state=completed", { sid, len: reply.length, polls: i + 1, preview: reply.slice(0, 200) });
-        return { text: reply, parts: last.parts, info: last.info || null };
+        const finalReply = reply || replyWithReasoning;
+        logger.info("opencode", "polling: state=completed", { sid, len: (finalReply || "").length, polls: i + 1, preview: (finalReply || "").slice(0, 200) });
+        return { text: finalReply || "", parts: last.parts, info: last.info || null };
       }
 
       if (reply === lastText) {
         stableCount++;
+        // text stable x3 只在模型明确完成或处于非运行状态时才触发退出
+        // 模型可能在执行工具调用（tool calls），文本不变但状态仍是 "running"——不应切断
+        const state = last.info?.state || "";
+        const stateIsDone = state === "completed" || state === "error" || state === "aborted";
         if (stableCount >= 3) {
-          logger.info("opencode", "polling: text stable x3", { sid, len: reply.length, polls: i + 1, preview: reply.slice(0, 200) });
-          return { text: reply, parts: last.parts, info: last.info || null };
+          if (stateIsDone) {
+            const finalReply = reply || replyWithReasoning;
+            logger.info("opencode", "polling: text stable x3 (state done)", { sid, state, len: (finalReply || "").length, polls: i + 1, preview: (finalReply || "").slice(0, 200) });
+            return { text: finalReply || "", parts: last.parts, info: last.info || null };
+          }
+          // 状态仍在运行中（如 "running"），可能是因为工具调用导致文本暂时不变
+          // 不退出，但把 stableCount 折半，避免工具返回后瞬间累积到阈值
+          if (stableCount % 6 === 0) {
+            logger.info("opencode", "polling: text stable but state running, keep waiting", { sid, state, len: reply.length, stableCount, polls: i + 1 });
+          }
+          stableCount = Math.floor(stableCount / 2);
         }
       } else {
         stableCount = 0;
@@ -416,7 +445,7 @@ async function _pollForReply(base, h, sid, esid, body, streamOpts) {
     }
   }
 
-  throw new Error("轮询超时（2 分钟）未收到回复");
+  throw new Error(`轮询超时（${POLL_MAX * 2 / 60} 分钟）未收到回复`);
 }
 
 /** 同步请求（流式失败的回退） */

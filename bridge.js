@@ -195,7 +195,7 @@ async function mainLoop({ token, baseUrl }) {
   const warmupTokens = getAllContextTokens(ACCOUNT_ID);
   const warmupUser = warmupTokens.length > 0 ? warmupTokens[warmupTokens.length - 1] : null;
 
-  if (sp && warmupUser) {
+  if (warmupUser) {
     const maxRetries = 8;
     const retryDelayMs = 15_000;
     let warmedUp = false;

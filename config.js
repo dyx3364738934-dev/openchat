@@ -168,8 +168,10 @@ export function getSystemPrompt() {
     if (existsSync(filePath)) {
       try {
         _systemPrompt = readFileSync(filePath, "utf-8").trim();
-        console.log(`📋 系统提示词已从 ${cfg.opencodeSystemPromptFile} 加载 (${_systemPrompt.length} 字符)`);
-        return _systemPrompt;
+        if (_systemPrompt) {
+          console.log(`📋 系统提示词已从 ${cfg.opencodeSystemPromptFile} 加载 (${_systemPrompt.length} 字符)`);
+        }
+        return _systemPrompt || null;
       } catch (err) {
         console.warn(`系统提示词文件加载失败: ${err.message}`);
         return null;

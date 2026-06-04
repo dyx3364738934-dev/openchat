@@ -16,7 +16,14 @@ if (Test-Path "$HOME\Desktop\openchat") { Remove-Item "$HOME\Desktop\openchat" -
 
 之后任何时候在终端输入 `openchat` 即可启动。
 
-### 方法二：手动安装
+> **如果下载失败**（GitHub 被墙）：用浏览器打开下面链接，手动下载 ZIP 放到桌面，然后运行：
+> https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip
+>
+> ```powershell
+> Set-Location "$HOME\Desktop"; Expand-Archive "openchat-master.zip" -DestinationPath . -Force; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
+> ```
+
+### 方法二：Git 安装
 
 > 如果你已经有 git 并且 npm 能正常运行，也可以用 git：
 

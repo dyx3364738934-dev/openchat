@@ -1,4 +1,4 @@
-# OpenChat v1.4.0
+# OpenChat v1.5.0
 
 微信 ↔ OpenCode Agent 桥 —— 用微信消息控制你的 AI Agent。
 
@@ -249,6 +249,34 @@ openchat/
 ---
 
 ## Changelog
+
+### v1.5.0
+
+**模型筛选重构:**
+- 接入 Zen 云 API (`opencode.ai/zen/v1/models`) 交叉过滤已下线模型，免费模型从 16 个精准到 6 个
+- 接入 `models.dev/api.json` 实时弃用检测，1 小时缓存
+- Zen 免费判定改用 `-free` 后缀（不再依赖不可靠的 cost 数据），VSCode 插件同款方案
+- 新增硬编码黑名单 `KNOWN_UNAVAILABLE`: ring-2.6-1t / trinity-large-preview-free
+- 移除 paidAllowlist 供应商门控——用户自配 API（openrouter / minimax 等）模型全部展示
+- Google gemma 系列硬编码排除（需独立 API key + 代理，日常用不上）
+
+**暖机 & 会话重做:**
+- 移除 session 持久化（`initSessions` / `saveSessions`），每次启动全新对话
+- 暖机用真实用户 ID 替代 `_warmup_` 假 ID——session 直接复用，零浪费
+- 暖机回复推送微信作为欢迎消息
+
+**消息批次合并:**
+- 同一批次内同一用户的纯文字消息合并为一条（`\n` 拼接），保留完整上下文
+- 含媒体消息不参与合并，直接走 `pendingMedia` 机制
+- 交互模式 120s 超时自动清除，防止误吞正常消息
+
+**Bug 修复 (6 项):**
+- logger.js: `flushLogQueue` 写入竞态（`_writing` 标志时序错误，日志滞留队列）
+- opencode-client.js: session 创建并发竞态（递归 `getOrCreateSession` 替代直调）
+- models.js: 默认模型 ID 不再硬编码 `deepseek` provider
+- commands.js: `/model refresh` 在交互模式下被误解析为模型选择
+- agent.js: 图片回退重试失败后错误上报使用 `retryErr` 而非原始 `err`
+- prompt.txt: 从行为指令改为环境描述，不再与 agent 人设冲突
 
 ### v1.4.1
 

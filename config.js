@@ -96,8 +96,6 @@ function loadConfig() {
     paidAllowlist: new Set(fc.paidAllowlist || [
       "deepseek/deepseek-v4-pro",
       "deepseek/deepseek-v4-flash",
-      "deepseek/deepseek-chat",
-      "deepseek/deepseek-reasoner",
       "google/gemini-2.5-flash",
       "google/gemini-2.5-flash-lite",
       "google/gemini-2.5-pro",

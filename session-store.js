@@ -92,7 +92,7 @@ export function getAllContextTokens(accountId) {
   return result;
 }
 
-/** 清除指定 account 的所有 context token（内存+磁盘） */
+/** 清除指定 account 的所有 context token（内存+磁盘），以及 session IDs */
 export function clearAllContextTokens(accountId) {
   const prefix = `${accountId}:`;
   for (const key of contextTokenStore.keys()) {
@@ -106,6 +106,65 @@ export function clearAllContextTokens(accountId) {
   const syncPath = resolveSyncBufPath(accountId);
   if (existsSync(syncPath)) {
     try { fsp.unlink(syncPath).catch(() => {}); } catch {}
+  }
+  const sessionPath = resolveSessionPath(accountId);
+  if (existsSync(sessionPath)) {
+    try { fsp.unlink(sessionPath).catch(() => {}); } catch {}
+  }
+}
+
+// ======== Session ID Store ========
+
+/** OpenCode session ID 持久化，restart 后复用同一对话而非开新的 */
+
+function resolveSessionPath(accountId) {
+  const { stateDir } = getConfig();
+  return resolve(stateDir, `${accountId}.sessions.json`);
+}
+
+/** 保存 sessions Map → 磁盘（异步，防抖 500ms） */
+let _sessionPersistTimer = null;
+export function saveSessions(accountId, sessionsMap) {
+  if (_sessionPersistTimer) clearTimeout(_sessionPersistTimer);
+  _sessionPersistTimer = setTimeout(() => {
+    const obj = {};
+    for (const [key, value] of sessionsMap) {
+      // 跳过暖机的临时 key，不持久化
+      if (key.startsWith("_warmup_:")) continue;
+      obj[key] = value;
+    }
+    const filePath = resolveSessionPath(accountId);
+    fsp.mkdir(dirname(filePath), { recursive: true }).then(() =>
+      fsp.writeFile(filePath, JSON.stringify(obj), "utf-8")
+    ).catch(err => console.error(`saveSessions: 写入失败 ${filePath}: ${err.message}`));
+  }, 500);
+}
+
+/** 从磁盘恢复 session IDs，返回 Map<"userId:modelId", sessionId> */
+export function restoreSessions(accountId) {
+  const filePath = resolveSessionPath(accountId);
+  try {
+    if (!existsSync(filePath)) return null;
+    const data = JSON.parse(readFileSync(filePath, "utf-8"));
+    const map = new Map();
+    for (const [key, value] of Object.entries(data)) {
+      if (typeof value === "string" && value) map.set(key, value);
+    }
+    if (map.size > 0) {
+      console.log(`📋 恢复 ${map.size} 个 session ID (account=${accountId})`);
+    }
+    return map;
+  } catch (err) {
+    console.warn(`restoreSessions: 读取失败 ${filePath}: ${err.message}`);
+    return null;
+  }
+}
+
+/** 清除指定 account 的 session ID 文件 */
+export function clearSessions(accountId) {
+  const filePath = resolveSessionPath(accountId);
+  if (existsSync(filePath)) {
+    try { fsp.unlink(filePath).catch(() => {}); } catch {}
   }
 }
 

@@ -29,6 +29,8 @@ import {
   sendMessage,
   notifyStart,
   notifyStop,
+  extractTextFromItemList,
+  MessageItemType,
 } from "./wechat-api.js";
 import {
   checkHealth,
@@ -41,6 +43,7 @@ import {
   saveGetUpdatesBuf,
   loadGetUpdatesBuf,
   clearAllContextTokens,
+  getAllContextTokens,
 } from "./session-store.js";
 
 // src/ 模块化导入
@@ -188,28 +191,34 @@ async function mainLoop({ token, baseUrl }) {
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-// 模型暖机：确保 OpenCode 模型就绪，不发欢迎消息
-  if (sp) {
+// 模型暖机：用最后活跃用户的真实 ID 创建 session，暖机后直接复用
+  const warmupTokens = getAllContextTokens(ACCOUNT_ID);
+  const warmupUser = warmupTokens.length > 0 ? warmupTokens[warmupTokens.length - 1] : null;
+
+  if (sp && warmupUser) {
     const maxRetries = 8;
     const retryDelayMs = 15_000;
     let warmedUp = false;
+    let welcomeText = null;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       if (abortController.signal.aborted) break;
       try {
         logger.info("bridge", `模型暖机 (${attempt}/${maxRetries})`);
-        const result = await sendToAgent("_warmup_", "你好");
+        // 用真实用户 ID 创建 session，后续消息自动复用，AI 看到完整对话历史
+        const result = await sendToAgent(warmupUser.userId, "你好");
         const wf = new StreamingMarkdownFilter();
         const text = wf.feed(result.text) + wf.flush();
 
-if (text.trim()) {
+        if (text.trim()) {
           warmedUp = true;
+          welcomeText = text.trim();
           logger.info("bridge", "模型暖机完成", { len: text.length, attempts: attempt });
           break;
         }
 
         if (attempt < maxRetries) {
-          console.log(`⏳ 模型暖机中... (${attempt}/${maxRetries})，${retryDelayMs / 1000}s 后重试`);
+          console.log(`\u23f3 模型暖机中... (${attempt}/${maxRetries})，${retryDelayMs / 1000}s 后重试`);
           await sleep(retryDelayMs, abortController.signal);
         }
       } catch (err) {
@@ -220,6 +229,22 @@ if (text.trim()) {
 
     if (!warmedUp) {
       logger.warn("bridge", "模型暖机未成功，首条消息可能延迟");
+    }
+
+    // 推送暖机回复到微信（无需单独清理 session——用户后续消息会复用该 session）
+    if (welcomeText) {
+      try {
+        await sendMessage({
+          baseUrl, token,
+          toUserId: warmupUser.userId,
+          text: welcomeText,
+          contextToken: warmupUser.token,
+        });
+        console.log(`\u{1F44B} 暖机问候已推送 → ${warmupUser.userId}`);
+        logger.info("bridge", "暖机问候已推送", { to: warmupUser.userId });
+      } catch (err) {
+        logger.warn("bridge", "暖机问候推送失败（非关键）", err.message);
+      }
     }
   }
 
@@ -298,13 +323,58 @@ if (text.trim()) {
         getUpdatesBuf = resp.get_updates_buf;
       }
 
-      // 处理每条消息
+      // 处理消息：同一批次内，同一用户的非命令消息合并为一条
+      // 命令消息（以 / 开头）始终单独处理；普通消息合并文本，一个 turn 完成
       const msgs = resp.msgs ?? [];
       if (msgs.length > 0) {
         logger.debug("bridge", `收到 ${msgs.length} 条消息`);
       }
 
+      const deduped = [];
+      const mergedByUser = new Map(); // uid → { texts: [], lastMsg }
       for (const msg of msgs) {
+        const uid = msg.from_user_id;
+        if (!uid) continue;
+        const text = extractTextFromItemList(msg.item_list).trim();
+        // 含媒体内容的消息（图片/文件/视频）直接处理，不参与文本合并
+        const hasMedia = msg.item_list?.some(
+          i => i.type === MessageItemType.IMAGE
+            || i.type === MessageItemType.FILE
+            || i.type === MessageItemType.VIDEO
+        );
+        if (hasMedia) {
+          deduped.push(msg);
+        } else if (text.startsWith("/")) {
+          deduped.push(msg); // 命令消息不参与合并
+        } else if (text) {
+          const entry = mergedByUser.get(uid);
+          if (entry) {
+            entry.texts.push(text);
+            entry.lastMsg = msg;
+          } else {
+            mergedByUser.set(uid, { texts: [text], lastMsg: msg });
+          }
+        }
+      }
+      for (const { texts, lastMsg } of mergedByUser.values()) {
+        if (texts.length > 1) {
+          // 合并为一条，写入最后一条消息的 text_item
+          const merged = texts.join("\n");
+          const itemList = lastMsg.item_list || [];
+          const textItem = itemList.find(i => i.type === 1);
+          if (textItem?.text_item) {
+            textItem.text_item.text = merged;
+          } else {
+            itemList.unshift({ type: 1, text_item: { text: merged } });
+          }
+        }
+        deduped.push(lastMsg);
+      }
+      if (deduped.length < msgs.length) {
+        logger.info("bridge", `批次合并: ${msgs.length} → ${deduped.length} 条`);
+      }
+
+      for (const msg of deduped) {
         if (shuttingDown) break;
         activeMessages++;
         try {

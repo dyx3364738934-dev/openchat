@@ -16,8 +16,28 @@ import { VALID_COMMANDS } from "./constants.js";
 /** 用户偏好（内存存储）：userId → { model?, agent? } */
 export const userPrefs = new Map();
 
-/** 命令上下文（交互式命令用）：userId → { cmd, data } */
-export const cmdContext = new Map();
+/** 命令上下文（交互式命令用）：userId → { cmd, data }
+ *  包装了定时器：120 秒无操作自动清除，防止误吞正常消息 */
+const _ctxStore = new Map();
+const _ctxTimers = new Map();
+const CTX_TIMEOUT_MS = 120_000;
+
+export const cmdContext = {
+  get(userId) { return _ctxStore.get(userId); },
+  has(userId) { return _ctxStore.has(userId); },
+  set(userId, data) {
+    if (_ctxTimers.has(userId)) clearTimeout(_ctxTimers.get(userId));
+    _ctxTimers.set(userId, setTimeout(() => {
+      _ctxStore.delete(userId);
+      _ctxTimers.delete(userId);
+    }, CTX_TIMEOUT_MS));
+    return _ctxStore.set(userId, data);
+  },
+  delete(userId) {
+    if (_ctxTimers.has(userId)) { clearTimeout(_ctxTimers.get(userId)); _ctxTimers.delete(userId); }
+    return _ctxStore.delete(userId);
+  },
+};
 
 // ======== 命令处理 ========
 
@@ -37,6 +57,10 @@ export async function handleSlashCommand(raw, userId, { token, baseUrl, contextT
       // 再次输入 /model（无参数）→ 重新列出模型列表
       cmdContext.delete(userId);
       // 继续往下执行 /model 命令
+    } else if (cmd === "model" && args[0]?.toLowerCase() === "refresh") {
+      // /model refresh 不应被当作模型选择
+      cmdContext.delete(userId);
+      // 继续往下执行刷新逻辑
     } else {
       // /model 2  → 解析为选择序号 2
       const choice = (cmd === "model" && args[0]) ? args[0] : cmd;

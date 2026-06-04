@@ -45,11 +45,13 @@ function flushLogQueue() {
   const logPath = getLogPath();
   fsp.appendFile(logPath, logs, "utf-8").catch(err => {
     console.error(`logger: 异步写入日志文件失败 ${err.message}`);
-  }).finally(() => { _writing = false; });
-  // 如果队列中又积累了日志，安排下次写入
-  if (_writeQueue.length > 0) {
-    setTimeout(flushLogQueue, 50);
-  }
+  }).finally(() => {
+    _writing = false;
+    // 写入期间队列又积累了新日志，安排下次刷盘
+    if (_writeQueue.length > 0) {
+      setTimeout(flushLogQueue, 50);
+    }
+  });
 }
 
 function timestamp() {

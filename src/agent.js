@@ -203,6 +203,7 @@ export async function sendToAgentWithReply(userId, text, mediaParts, { token, ba
         return;
       } catch (retryErr) {
         logger.error("agent", "图片回退重试也失败", retryErr);
+        err = retryErr; // 替换外层的 err，确保通用错误处理上报正确的根因
       }
     }
 

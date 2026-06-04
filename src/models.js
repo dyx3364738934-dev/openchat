@@ -14,6 +14,105 @@ import { logger } from "../logger.js";
 import { getConfig } from "../config.js";
 import { getOpenCodePort, getOpenCodeAuth } from "../opencode-client.js";
 
+// ======== 硬编码模型常量 ========
+
+/** 免费但名称不以 -free 结尾的模型（手动维护） */
+const FREE_MODEL_IDS = new Set(["big-pickle"]);
+
+/** 已知不可用的模型 ID（API 端点已关闭/损坏，提前排除，不浪费探头） */
+const KNOWN_UNAVAILABLE_MODEL_IDS = new Set([
+  "ring-2.6-1t",
+  "ring-2.6-1t-free",
+  "trinity-large-preview-free",
+]);
+
+/** 容量受限模型备注（/model 列表时展示） */
+const CAPACITY_LIMITED_NOTES = {
+  "qwen3.6-plus-free":
+    "容量受限——短 prompt 稳定，高并发或大工具目录可能 5xx，建议回退到 deepseek-v4-flash-free / big-pickle",
+};
+
+// ======== models.dev 元数据缓存 ========
+
+const MODELS_DEV_API_URL = "https://models.dev/api.json";
+const MODELS_DEV_TTL_MS = 3600_000; // 1 小时缓存
+
+let _modelsDevSnapshot = null;
+let _modelsDevFetchedAt = 0;
+
+/** 从 models.dev 获取模型元数据快照（含弃用状态），按小时缓存 */
+async function fetchModelsDevSnapshot() {
+  const now = Date.now();
+  if (_modelsDevSnapshot && (now - _modelsDevFetchedAt) < MODELS_DEV_TTL_MS) {
+    return _modelsDevSnapshot;
+  }
+  try {
+    const res = await fetch(MODELS_DEV_API_URL, {
+      headers: { "User-Agent": "openchat/1.4" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      logger.warn("models", `models.dev 返回 HTTP ${res.status}，使用缓存`);
+      return _modelsDevSnapshot || null;
+    }
+    _modelsDevSnapshot = await res.json();
+    _modelsDevFetchedAt = now;
+    logger.debug("models", "models.dev 元数据已更新");
+    return _modelsDevSnapshot;
+  } catch (err) {
+    logger.warn("models", "models.dev 元数据获取失败（非关键）", err.message);
+    return _modelsDevSnapshot || null;
+  }
+}
+
+/**
+ * 检查模型是否被 models.dev 标记为 deprecated
+ * @param {string} shortId - 短模型 ID（如 "qwen3.6-plus-free"）
+ * @param {string} provider - 供应商 ID（如 "opencode"）
+ */
+function isModelDeprecated(snapshot, shortId, provider) {
+  if (!snapshot?.providers?.[provider]) return false;
+  return snapshot.providers[provider][shortId]?.status === "deprecated";
+}
+
+// ======== Zen 云 API 模型列表 ========
+
+const ZEN_MODELS_URL = "https://opencode.ai/zen/v1/models";
+const ZEN_CACHE_TTL_MS = 600_000; // 10 分钟缓存（比 models.dev 短，模型上下线更频繁）
+
+let _zenModelIds = null;
+let _zenFetchedAt = 0;
+
+/**
+ * 从 Zen 云 API 获取当前在线的模型 ID 集合
+ * 云 API 只返回实际可用的模型，已下线/弃用的模型不会出现在列表中
+ * 这就是 VSCode 插件免费模型只有 3-4 个的根因
+ */
+async function fetchZenModelIds() {
+  const now = Date.now();
+  if (_zenModelIds && (now - _zenFetchedAt) < ZEN_CACHE_TTL_MS) {
+    return _zenModelIds;
+  }
+  try {
+    const res = await fetch(ZEN_MODELS_URL, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      logger.warn("models", `Zen 云 API 返回 HTTP ${res.status}，使用缓存`);
+      return _zenModelIds || null;
+    }
+    const data = await res.json();
+    if (!data?.data || !Array.isArray(data.data)) return _zenModelIds || null;
+    _zenModelIds = new Set(data.data.filter(m => m.id).map(m => m.id));
+    _zenFetchedAt = now;
+    logger.info("models", `Zen 云 API: ${_zenModelIds.size} 个在线模型`);
+    return _zenModelIds;
+  } catch (err) {
+    logger.warn("models", "Zen 云 API 不可达（非关键）", err.message);
+    return _zenModelIds || null;
+  }
+}
+
 // ======== 坏模型持久化缓存 ========
 
 // __dirname 在 src/ 下，需要上一级回到项目根
@@ -146,8 +245,18 @@ export async function fetchRawModels() {
     if (!Array.isArray(models)) return [];
     return models.map(m => {
       const id = m.providerID + "/" + m.id;
-      const isFree = (Array.isArray(m.cost) && m.cost.some(c => c.input === 0 && c.output === 0))
-        || m.id.toLowerCase().includes(":free");
+      const shortId = m.id; // API 返回的短 ID，如 "qwen3.6-plus-free"
+      const provider = m.providerID;
+
+      // 按供应商分支免费判定：
+      // - opencode (Zen): -free 后缀是权威免费标识，不依赖 cost 数据
+      //   因为 cost 数据可能包含试用条目 {input:0,output:0}，导致误判
+      // - 其他供应商: cost 数据 + :free / -free 命名惯例
+      const isFree = provider === "opencode"
+        ? (shortId.toLowerCase().endsWith("-free") || FREE_MODEL_IDS.has(shortId))
+        : ((Array.isArray(m.cost) && m.cost.some(c => c.input === 0 && c.output === 0))
+            || shortId.toLowerCase().includes(":free")
+            || shortId.toLowerCase().endsWith("-free"));
       const hasImage = Array.isArray(m.capabilities?.input) && m.capabilities.input.includes("image");
       return { id, name: m.name || m.id, provider: m.providerID, free: isFree, hasImage };
     });
@@ -172,30 +281,80 @@ export async function fetchAvailableModels() {
 
   // 付费模型白名单（从配置读取，可自定义）
   const paidAllowlist = cfg.paidAllowlist;
-  const defaultId = defaultModel.includes("/") ? defaultModel : "deepseek/" + defaultModel;
-  if (!seen.has(defaultId)) {
-    seen.set(defaultId, { id: defaultId, name: defaultModel, provider: defaultModel.includes("/") ? defaultModel.split("/")[0] : "deepseek", free: false });
-  }
 
-  // 筛选：免费模型全部保留 + 付费模型只保留主力（从配置读取）
-  // paidAllowlist 在函数开头已从 cfg 获取
+  // 解析默认模型 ID，避免硬编码 provider
+  let defaultId, defaultProvider;
+  if (defaultModel.includes("/")) {
+    defaultId = defaultModel;
+    defaultProvider = defaultModel.split("/")[0];
+  } else {
+    // 短名称：从 paidAllowlist 或 seen 中查找完整 ID
+    defaultId = [...paidAllowlist].find(id => id.endsWith("/" + defaultModel))
+      || [...seen.keys()].find(id => id.endsWith("/" + defaultModel))
+      || "deepseek/" + defaultModel; // 兜底
+    defaultProvider = defaultId.includes("/") ? defaultId.split("/")[0] : "deepseek";
+  }
+  if (!seen.has(defaultId)) {
+    seen.set(defaultId, { id: defaultId, name: defaultModel, provider: defaultProvider, free: false });
+  }
 
   // 从持久化文件加载已知坏模型
   const brokenModels = loadBrokenModels();
 
+  // 获取 models.dev 元数据快照（非关键，失败不影响）
+  const modelsDevSnapshot = await fetchModelsDevSnapshot();
+
   // 排除非聊天用途
   const skipKeywords = ["embedding", "tts", "live", "native-audio"];
 
-  const candidates = [...seen.values()].filter(m => {
+  let candidates = [...seen.values()].filter(m => {
+    // 解析短 ID 用于 models.dev / 黑名单匹配
+    const shortId = m.id.includes("/") ? m.id.split("/").slice(1).join("/") : m.id;
+
     if (brokenModels.has(m.id)) return false;
+    if (KNOWN_UNAVAILABLE_MODEL_IDS.has(shortId)) {
+      logger.debug("models", "跳过已知不可用模型", { model: m.id });
+      return false;
+    }
+    if (isModelDeprecated(modelsDevSnapshot, shortId, m.provider)) {
+      logger.info("models", "跳过已弃用模型 (models.dev)", { model: m.id });
+      return false;
+    }
     const nameLower = (m.name || m.id).toLowerCase();
     for (const kw of skipKeywords) { if (nameLower.includes(kw)) return false; }
-    // 付费模型只保留主力
-    if (!m.free) return paidAllowlist.has(m.id);
-    // 免费模型：只保留 opencode (Zen) 和 google (gemma)
-    if (m.provider === "opencode" || m.provider === "google") return true;
-    return false;
+
+    // 谷歌 gemma 系列硬编码排除（需独立 API key + 代理，日常用不上）
+    if (m.provider === "google" && shortId.toLowerCase().startsWith("gemma")) return false;
+
+    // 其余模型全展示——用户配置了就是有用的，不替用户做选择
+    return true;
   });
+
+  // Zen 模型：用云 API 做最终过滤（云 API 只返回实际在线的模型，已下线的不会出现）
+  const zenCloudIds = await fetchZenModelIds();
+  if (zenCloudIds) {
+    const before = candidates.filter(m => m.provider === "opencode").length;
+    candidates = candidates.filter(m => {
+      if (m.provider !== "opencode") return true;
+      const shortId = m.id.includes("/") ? m.id.split("/").slice(1).join("/") : m.id;
+      return zenCloudIds.has(shortId);
+    });
+    const after = candidates.filter(m => m.provider === "opencode").length;
+    const removed = before - after;
+    if (removed > 0) {
+      logger.info("models", `Zen 云 API 过滤: ${removed} 个已下线模型已排除`);
+    }
+  }
+
+  // Zen (opencode) 套餐只保留免费模型——付费模型走 Zen 云 API 不是 openchat 的目标场景
+  {
+    const before = candidates.length;
+    candidates = candidates.filter(m => m.provider !== "opencode" || m.free);
+    const removed = before - candidates.length;
+    if (removed > 0) {
+      logger.info("models", `Zen 付费模型过滤: ${removed} 个已排除`);
+    }
+  }
 
   // 排序：免费优先
   const result = candidates.sort((a, b) => {

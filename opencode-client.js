@@ -115,10 +115,10 @@ async function getOrCreateSession(userId, model) {
   // 如果另一个并发请求正在创建 session，等待它完成后取结果
   if (locks.has(key)) {
     await locks.get(key);
-    // 等待完成后，创建方应该已经设置好了 sessions
-    if (sessions.has(key)) return sessions.get(key);
-    // 极端情况：创建方失败了，重试一次（非递归）
-    return _createSession(userId, model, key);
+    // 递归回到 getOrCreateSession：
+    // - 如果创建方成功了 → sessions.has(key) 命中，直接返回
+    // - 如果创建方失败了 → locks.delete(key) 已执行，本次会走 _createSession 并新建 lock，确保互斥
+    return getOrCreateSession(userId, model);
   }
 
   return _createSession(userId, model, key);
@@ -262,8 +262,15 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
       if (res.status === 404) {
         // session 过期，清除缓存并重建
         const key = sessionKey(userId, targetModel);
+        const oldSid = sid;
         sessions.delete(key);
-        logger.info("opencode", "session 过期，重建", { userId, model: targetModel, oldSid: sid });
+        logger.info("opencode", "session 过期，重建", { userId, model: targetModel, oldSid });
+        // 尝试清理服务端的孤儿会话（不影响重建流程）
+        fetch(base + "/session/" + encodeURIComponent(oldSid), {
+          method: "DELETE",
+          headers: h,
+          signal: AbortSignal.timeout(3000),
+        }).catch(() => {});
         try {
           sid = await getOrCreateSession(userId, targetModel);
         } catch (retryErr) {
@@ -298,6 +305,32 @@ export async function sendToAgent(userId, text, opts = {}, mediaParts = []) {
 
 export async function checkHealth() {
   try { const d = await detect(); return !!d; } catch { return false; }
+}
+
+/**
+ * 删除指定用户+模型的 session（从 OpenCode 服务端和本地缓存）
+ * 用于暖机后清理、以及 404 回退时消除孤儿会话
+ * @returns {Promise<boolean>} 是否成功删除
+ */
+export async function deleteSession(userId, model) {
+  const key = sessionKey(userId, model || getConfig().opencodeModel || "deepseek-v4-pro");
+  const sid = sessions.get(key);
+  if (!sid) return false;
+  sessions.delete(key);
+  try {
+    const base = await baseUrl();
+    const h = headers();
+    const r = await fetch(base + "/session/" + encodeURIComponent(sid), {
+      method: "DELETE",
+      headers: h,
+      signal: AbortSignal.timeout(5000),
+    });
+    logger.info("opencode", "session deleted", { userId, model, sid, status: r.status });
+    return r.ok || r.status === 404;
+  } catch (err) {
+    logger.warn("opencode", "session delete failed (non-critical)", { userId, model, sid, err: err.message });
+    return false;
+  }
 }
 
 export function stopOpenCodeServer() {}

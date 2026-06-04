@@ -9,7 +9,7 @@
 在 OpenCode 内置终端（Ctrl+`）里粘贴下面这一行：
 
 ```powershell
-Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你在微信环境里和用户聊天。回复要像微信消息一样简短自然。'; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
+if (Test-Path "$HOME\Desktop\openchat") { Remove-Item "$HOME\Desktop\openchat" -Recurse -Force }; Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你正通过微信与用户 Koko 交流。这是即时消息环境——不是文档编辑器，不是邮件。你自身的回复风格与专业程度由你的 agent 人设决定，无需刻意缩短或拉长。'; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
 ```
 
 首次运行会弹二维码图片，用微信扫码登录。

@@ -9,7 +9,7 @@
 在 OpenCode 内置终端（Ctrl+`）里粘贴下面这一行：
 
 ```powershell
-if (Test-Path "$HOME\Desktop\openchat") { Remove-Item "$HOME\Desktop\openchat" -Recurse -Force }; Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; Set-Content prompt.txt '你正通过微信与用户 Koko 交流。这是即时消息环境——不是文档编辑器，不是邮件。你自身的回复风格与专业程度由你的 agent 人设决定，无需刻意缩短或拉长。'; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
+if (Test-Path "$HOME\Desktop\openchat") { Remove-Item "$HOME\Desktop\openchat" -Recurse -Force }; Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip; Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
 ```
 
 首次运行会弹二维码图片，用微信扫码登录。
@@ -25,7 +25,6 @@ git clone https://github.com/dyx3364738934-dev/openchat.git
 cd openchat
 npm install
 copy config.example.json config.json
-echo 你在微信环境里和用户聊天。回复要像微信消息一样简短自然。> prompt.txt
 node bridge.js
 ```
 
@@ -65,37 +64,28 @@ npm.cmd install
 
 所有配置都可以通过 **环境变量** 或 **config.json** 修改，环境变量优先。
 
-### 1. 系统提示词（AI 行为）
+### 1. 系统提示词（可选）
 
-这是最核心的 DIY 入口。支持三种方式：
+AI 的行为与人格由 OpenCode agent 人设（`persona.md` + `build-prompt.md`）完整定义，通常无需额外配置。如需注入环境指令，支持两种方式：
 
-**方式 A：prompt.txt 文件（推荐）**
-
-编辑项目根目录的 `prompt.txt`，告诉 AI 它在什么环境里聊天：
-
-```
-你在微信环境里和用户聊天。回复要像微信消息一样简短自然，别写长篇大论。
-```
-
-> `prompts/` 目录下提供了示例插件文件。  
-> 关于 AI 人设的深度注入方案，详见 `docs/injection-prompt-v3.0.md`（OpenCode agent 配置参考）。
-
-**方式 B：config.json 字段**
+**方式 A：config.json 字段**
 
 ```json
 {
-  "opencodeSystemPrompt": "你是一个专业的编程助手，用简洁的中文回答技术问题。"
+  "opencodeSystemPrompt": "你通过微信与用户交流。"
 }
 ```
 
-**方式 C：环境变量**
+**方式 B：环境变量**
 
 ```bash
 set OPENCODE_SYSTEM_PROMPT=你是一个猫娘，每句话结尾要加喵~
 openchat
 ```
 
-> 优先级：环境变量 > config.json 直接值 > prompt.txt 文件
+> 优先级：环境变量 > config.json 直接值
+>
+> 关于 AI 人设的深度注入方案，详见 `docs/injection-prompt-v3.0.md`（OpenCode agent 配置参考）。
 
 ### 2. 默认模型
 
@@ -128,7 +118,6 @@ openchat
   "wechatToken": "",
   "opencodeAgent": "build",
   "opencodeModel": "deepseek/deepseek-v4-pro",
-  "opencodeSystemPromptFile": "prompt.txt",
   "allowFrom": []
 }
 ```
@@ -138,8 +127,7 @@ openchat
 | `wechatToken` | `WECHAT_TOKEN` | 自动保存 | 微信机器人 token，扫码后自动填 |
 | `opencodeModel` | `OPENCODE_MODEL` | `deepseek-v4-pro` | 默认模型 |
 | `opencodeAgent` | `OPENCODE_AGENT` | `build` | OpenCode agent 类型 |
-| `opencodeSystemPrompt` | `OPENCODE_SYSTEM_PROMPT` | 无 | 系统提示词（直接文本） |
-| `opencodeSystemPromptFile` | — | `prompt.txt` | 系统提示词文件路径 |
+| `opencodeSystemPrompt` | `OPENCODE_SYSTEM_PROMPT` | 无 | 系统提示词（可选，直接文本） |
 | `allowFrom` | `ALLOW_FROM` | `[]` | 白名单用户 ID |
 
 ---
@@ -240,7 +228,6 @@ openchat/
 │   └── wechat-chat.txt   示例：微信简短聊天
 ├── docs/                 参考文档
 │   └── injection-prompt-v3.0.md  OpenCode 人设注入方案文档
-├── prompt.txt            系统提示词（可自由编辑）
 ├── config.example.json   配置模板
 ├── config.json           运行时配置（首次复制自模板）
 └── openchat.bat          启动器

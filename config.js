@@ -84,7 +84,7 @@ function loadConfig() {
 
     // 业务配置
     allowFrom: normalizeAllowFrom(env(ENV.ALLOW_FROM) || fc.allowFrom || []),
-    botAgent: env(ENV.BOT_AGENT) || fc.botAgent || "WeChat-OpenCode-Bridge/1.0",
+    botAgent: env(ENV.BOT_AGENT) || fc.botAgent || "OpenChat/2.0",
     longPollTimeoutMs: parseInt(env(ENV.LONG_POLL_TIMEOUT_MS)) || fc.longPollTimeoutMs || 35000,
     // 启动时是否发送欢迎消息（默认 true，设为 false 关闭）
     welcomeEnabled: (() => {

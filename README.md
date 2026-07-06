@@ -1,8 +1,6 @@
 # OpenChat v2.0.0
 
-微信 ↔ Agent 桥 —— 用微信消息控制你的 OpenCode / mimo Agent。
-
-> 这版是把上一阶段的独立 CLI 方向重新收束回 `openchat` 名称后的新版本：保留 v1.5.0 稳定微信桥，并加入 `第二阶段-openchat-cli/` 作为 v2 CLI PoC。
+微信 ↔ OpenCode Agent 桥 —— 用微信消息控制你的 AI Agent。
 
 ## 安装
 
@@ -42,21 +40,6 @@ node bridge.js
 ```bash
 npm install -g https://github.com/dyx3364738934-dev/openchat.git
 openchat
-```
-
-### v2 CLI PoC 启动
-
-如果要试验不依赖 OpenCode 桌面版的 v2 CLI：
-
-```bash
-cd openchat
-npm run repl
-```
-
-或直接运行：
-
-```bash
-node 第二阶段-openchat-cli/bin/openchat.js --no-wechat
 ```
 
 ### 常见安装问题

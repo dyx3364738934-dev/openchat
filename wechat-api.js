@@ -94,7 +94,7 @@ function buildBaseInfo() {
   const { botAgent } = getAppConfig();
   return {
     channel_version: CHANNEL_VERSION,
-    bot_agent: botAgent || "WeChat-OpenCode-Bridge/1.0",
+    bot_agent: botAgent || "OpenChat/2.0",
   };
 }
 

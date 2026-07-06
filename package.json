@@ -1,17 +1,34 @@
 {
   "name": "openchat",
   "version": "2.0.0",
-  "description": "OpenChat - WeChat + OpenCode/mimo Agent Bridge",
+  "description": "OpenChat - WeChat + OpenCode Agent Bridge",
   "type": "module",
   "main": "bridge.js",
   "bin": {
     "openchat": "bridge.js"
   },
+  "files": [
+    "bridge.js",
+    "opencode-client.js",
+    "wechat-api.js",
+    "wechat-auth.js",
+    "cdn.js",
+    "markdown-filter.js",
+    "session-store.js",
+    "config.js",
+    "logger.js",
+    "src/",
+    "prompts/",
+    "docs/",
+    "config.example.json",
+    "openchat.bat",
+    "openchat.cmd",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node bridge.js",
-    "login": "node bridge.js --login-only",
-    "cli": "node 第二阶段-openchat-cli/bin/openchat.js",
-    "repl": "node 第二阶段-openchat-cli/bin/openchat.js --no-wechat"
+    "login": "node bridge.js --login-only"
   },
   "dependencies": {
     "qrcode": "^1.5.4"

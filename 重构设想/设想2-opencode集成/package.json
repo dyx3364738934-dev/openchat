@@ -1,0 +1,25 @@
+{
+  "name": "openchat-cli-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PoC: openchat 启动器 — 自动启动 mimo/opencode serve + 微信桥（不再依赖桌面版）",
+  "bin": {
+    "openchat": "bin/openchat.js"
+  },
+  "scripts": {
+    "start": "node bin/openchat.js",
+    "test": "node bin/openchat.js --port 14115"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "@mimo-ai/cli": ">=0.1.0",
+    "opencode-ai": ">=1.14.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

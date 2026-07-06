@@ -1,12 +1,17 @@
 {
   "name": "openchat",
-  "version": "1.5.0",
-  "description": "OpenChat - WeChat + OpenCode Agent Bridge",
+  "version": "2.0.0",
+  "description": "OpenChat - WeChat + OpenCode/mimo Agent Bridge",
   "type": "module",
   "main": "bridge.js",
+  "bin": {
+    "openchat": "bridge.js"
+  },
   "scripts": {
     "start": "node bridge.js",
-    "login": "node bridge.js --login-only"
+    "login": "node bridge.js --login-only",
+    "cli": "node 第二阶段-openchat-cli/bin/openchat.js",
+    "repl": "node 第二阶段-openchat-cli/bin/openchat.js --no-wechat"
   },
   "dependencies": {
     "qrcode": "^1.5.4"

@@ -1,0 +1,25 @@
+{
+  "name": "openchat-cli",
+  "version": "2.0.0",
+  "description": "openchat — 命令行 AI 交互工具（基于 mimocode/opencode CLI + 微信桥）",
+  "type": "module",
+  "main": "bin/openchat.js",
+  "bin": {
+    "openchat": "bin/openchat.js"
+  },
+  "scripts": {
+    "start": "node bin/openchat.js",
+    "test": "node bin/openchat.js --no-wechat --model huoshan/glm-5.1"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "@mimo-ai/cli": ">=0.1.0",
+    "opencode-ai": ">=1.14.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

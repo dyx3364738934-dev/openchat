@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * bridge.js — WeChat + OpenCode Agent Bridge
  *

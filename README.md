@@ -2,28 +2,18 @@
 
 微信 ↔ OpenCode Agent 桥 —— 用微信消息控制你的 AI Agent。
 
+## OpenChat v2.0.1 更新内容
+
+- 补齐正式发行作品：新增 `release/openchat-2.0.1.tgz`，并发布 GitHub Release `v2.0.1`。
+- 清理发行树：移除内部 PoC、重构草稿和旧启动入口，仓库当前分支只保留正式运行文件。
+- 统一品牌口径：文档、包描述、默认 `bot_agent` 统一为 OpenChat。
+- 规范 npm 发行包：通过 `package.json.files` 限定发行内容，避免把本地状态、日志、依赖目录或敏感配置打进包里。
+- 修复 Windows 启动器：`openchat.bat` / `openchat.cmd` 不再硬编码旧路径，改为从当前目录启动 `bridge.js`。
+- 提供全局命令入口：安装后可直接运行 `openchat`。
+
 ## 安装
 
-### 方法一：一键命令（推荐，ZIP 安装）
-
-在 OpenCode 内置终端（Ctrl+`）里粘贴下面这一行：
-
-```powershell
-if (Test-Path "$HOME\Desktop\openchat") { Remove-Item "$HOME\Desktop\openchat" -Recurse -Force }; Set-Location "$HOME\Desktop"; Invoke-WebRequest "https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip" -OutFile openchat.zip -Proxy "http://127.0.0.1:7890"; if ($?) { Expand-Archive openchat.zip -DestinationPath . -Force; Remove-Item openchat.zip; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js } else { Write-Host "`n下载失败。请确保 Clash 代理已运行 (127.0.0.1:7890)，然后重试。`n" }
-```
-
-首次运行会弹二维码图片，用微信扫码登录。
-
-之后任何时候在终端输入 `openchat` 即可启动。
-
-> **如果下载失败**（GitHub 被墙）：用浏览器打开下面链接，手动下载 ZIP 放到桌面，然后运行：
-> https://github.com/dyx3364738934-dev/openchat/archive/refs/heads/master.zip
->
-> ```powershell
-> Set-Location "$HOME\Desktop"; Expand-Archive "openchat-master.zip" -DestinationPath . -Force; Rename-Item openchat-master openchat -ErrorAction SilentlyContinue; Set-Location openchat; npm.cmd install; Copy-Item config.example.json config.json; $p = (Get-Location).Path; [Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + $p, 'User'); node bridge.js
-> ```
-
-### 方法二：Git 安装
+### 方法一：Git 安装
 
 > 如果你已经有 git 并且 npm 能正常运行，也可以用 git：
 
@@ -35,10 +25,27 @@ copy config.example.json config.json
 node bridge.js
 ```
 
-或者安装成全局命令：
+首次运行会弹二维码图片，用微信扫码登录。
+
+### 方法二：全局安装
 
 ```bash
 npm install -g https://github.com/dyx3364738934-dev/openchat.git
+openchat
+```
+
+### 方法三：发行包安装
+
+从 GitHub Release 下载 `openchat-2.0.1.tgz`：
+
+```text
+https://github.com/dyx3364738934-dev/openchat/releases/tag/v2.0.1
+```
+
+下载后在文件所在目录运行：
+
+```bash
+npm install -g ./openchat-2.0.1.tgz
 openchat
 ```
 
@@ -52,7 +59,7 @@ npm.cmd install
 ```
 
 **git 不是有效命令：**  
-没装 git。用方法一（ZIP 下载）即可，不需要 git。
+没装 git。用方法三下载发行包安装即可。
 
 **Node.js 没装：**  
 去 [nodejs.org](https://nodejs.org/) 下载 v18+ 安装。
@@ -250,6 +257,20 @@ openchat/
 ---
 
 ## Changelog
+
+### v2.0.1
+
+**正式发行整理:**
+- 新增 GitHub Release `v2.0.1` 与发行包 `release/openchat-2.0.1.tgz`
+- README 增加 v2.0.1 更新内容，移除旧的长 PowerShell 安装方式
+- 删除内部 PoC / 重构草稿，当前发行树只保留正式运行文件
+- `package.json.files` 限定发行包内容，避免打包运行状态、日志、依赖目录和敏感配置
+
+**品牌与启动器修正:**
+- 统一包描述为 `OpenChat - WeChat + OpenCode Agent Bridge`
+- 默认 `bot_agent` 改为 `OpenChat/2.0`
+- 修复 `openchat.bat` / `openchat.cmd` 硬编码路径问题
+- 保留 `openchat` 全局命令入口
 
 ### v1.5.0
 

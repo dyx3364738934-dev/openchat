@@ -21,6 +21,21 @@ npm install -g https://github.com/dyx3364738934-dev/openchat.git
 openchat
 ```
 
+### 发行包安装
+
+从 Release 页面下载 `openchat-2.0.1.tgz`：
+
+```text
+https://github.com/dyx3364738934-dev/openchat/releases/tag/v2.0.1
+```
+
+下载后运行：
+
+```bash
+npm install -g ./openchat-2.0.1.tgz
+openchat
+```
+
 ## 运行条件
 
 - Windows 10 / 11
@@ -31,9 +46,11 @@ openchat
 ## 本版内容
 
 - 修正 v2.0.0 发行树，把内部 PoC / 重构草稿移出当前发行分支
+- README 增加 v2.0.1 更新内容
+- 移除旧的长 PowerShell 安装方式
 - 发布包名统一为 `openchat`
 - 提供 `openchat` 全局命令入口
-- README 补齐 Git / ZIP / npm 全局安装方式
+- README 保留 Git / npm 全局 / 发行包安装方式
 - 修复 Windows 启动器硬编码旧路径的问题
 - 发行包只包含运行所需文件，不包含本地运行状态、日志、依赖目录或敏感配置
 

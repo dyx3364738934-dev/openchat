@@ -1,4 +1,4 @@
-# OpenChat v2.0.0 发行说明
+# OpenChat v2.0.1 发行说明
 
 OpenChat 是微信 ↔ OpenCode Agent 桥。这个版本面向普通安装与使用，不包含实验性 PoC 文档或本地重构草稿。
 
@@ -30,6 +30,7 @@ openchat
 
 ## 本版内容
 
+- 修正 v2.0.0 发行树，把内部 PoC / 重构草稿移出当前发行分支
 - 发布包名统一为 `openchat`
 - 提供 `openchat` 全局命令入口
 - README 补齐 Git / ZIP / npm 全局安装方式

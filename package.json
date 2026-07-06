@@ -1,6 +1,6 @@
 {
   "name": "openchat",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "OpenChat - WeChat + OpenCode Agent Bridge",
   "type": "module",
   "main": "bridge.js",

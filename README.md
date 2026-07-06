@@ -1,4 +1,4 @@
-# OpenChat v2.0.0
+# OpenChat v2.0.1
 
 微信 ↔ OpenCode Agent 桥 —— 用微信消息控制你的 AI Agent。
 
